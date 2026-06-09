@@ -1,0 +1,36 @@
+# Self-contained PostgreSQL for the Drasi trading demo.
+# Configured for logical replication (wal_level=logical) so Drasi's postgres
+# CDC source can stream changes. init.sql seeds stocks/portfolio/watchlist and
+# creates the publication + replication slot the source subscribes to.
+name: drasi-trading-demo
+
+services:
+  postgres:
+    image: postgres:14-alpine
+    container_name: drasi-trading-postgres
+    environment:
+      POSTGRES_DB: trading_demo
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_admin
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+    ports:
+      # Published on 5632 to avoid clashing with a local Postgres on 5432.
+      - "5632:5432"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - trading_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d trading_demo"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  trading_postgres_data:

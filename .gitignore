@@ -1,0 +1,22 @@
+# POC snapshot — preserved but not part of the published package
+/poc
+
+# Test plugin binaries (built by `npm run pretest` / scripts/build-plugins.mjs)
+/plugins
+
+# Rust
+/target
+Cargo.lock.bak
+
+# Node
+/node_modules
+npm-debug.log*
+yarn-error.log*
+
+# napi build artifacts
+*.node
+/index.js
+/index.d.ts
+
+# Logs / scratch
+*.log

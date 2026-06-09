@@ -1,0 +1,69 @@
+# Build and test @drasi/lib.
+#
+# The package currently uses path dependencies to a sibling `drasi-core` checkout,
+# so CI clones it next to this repo. The npm `pretest` step builds the example
+# plugins from that checkout so the host and plugins share a matching plugin-SDK /
+# FFI ABI. Once a consistent set of Drasi crates is published to crates.io, the
+# `drasi-core` checkout can be removed and the Cargo deps switched to fixed
+# published versions.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - host: macos-latest
+            target: aarch64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.host }}
+    steps:
+      - name: Checkout drasi-nodejs
+        uses: actions/checkout@v4
+        with:
+          path: drasi-nodejs
+
+      - name: Checkout drasi-core (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: drasi-project/drasi-core
+          path: drasi-core
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        working-directory: drasi-nodejs
+        run: npm install
+
+      - name: Clippy
+        working-directory: drasi-nodejs
+        run: cargo clippy -- -D warnings
+
+      - name: Build addon
+        working-directory: drasi-nodejs
+        run: npm run build
+
+      - name: Test (pretest builds + stages example plugins)
+        working-directory: drasi-nodejs
+        run: npm test
+
+  # Cross-platform prebuilt binaries for npm publishing are a roadmap item.
+  # `@napi-rs/cli` supports a build matrix + per-platform optional-dependency
+  # packages; wire it up here once a consistent published Drasi crate set exists.

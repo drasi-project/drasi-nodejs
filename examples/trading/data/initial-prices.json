@@ -1,0 +1,152 @@
+[
+  {
+    "symbol": "AAPL",
+    "price": 175.5,
+    "volume": 25000000
+  },
+  {
+    "symbol": "ADBE",
+    "price": 520.3,
+    "volume": 10000000
+  },
+  {
+    "symbol": "AMD",
+    "price": 165.3,
+    "volume": 28000000
+  },
+  {
+    "symbol": "AMZN",
+    "price": 178.9,
+    "volume": 30000000
+  },
+  {
+    "symbol": "BA",
+    "price": 215.7,
+    "volume": 12000000
+  },
+  {
+    "symbol": "BAC",
+    "price": 34.25,
+    "volume": 30000000
+  },
+  {
+    "symbol": "CAT",
+    "price": 285.3,
+    "volume": 8000000
+  },
+  {
+    "symbol": "CRM",
+    "price": 285.4,
+    "volume": 12000000
+  },
+  {
+    "symbol": "CVX",
+    "price": 145.6,
+    "volume": 14000000
+  },
+  {
+    "symbol": "GE",
+    "price": 165.4,
+    "volume": 14000000
+  },
+  {
+    "symbol": "GOOGL",
+    "price": 140.75,
+    "volume": 22000000
+  },
+  {
+    "symbol": "GS",
+    "price": 425.6,
+    "volume": 8000000
+  },
+  {
+    "symbol": "HD",
+    "price": 385.6,
+    "volume": 8000000
+  },
+  {
+    "symbol": "INTC",
+    "price": 42.8,
+    "volume": 20000000
+  },
+  {
+    "symbol": "JNJ",
+    "price": 155.2,
+    "volume": 12000000
+  },
+  {
+    "symbol": "JPM",
+    "price": 195.8,
+    "volume": 16000000
+  },
+  {
+    "symbol": "KO",
+    "price": 62.3,
+    "volume": 18000000
+  },
+  {
+    "symbol": "LLY",
+    "price": 785.6,
+    "volume": 9000000
+  },
+  {
+    "symbol": "MA",
+    "price": 465.2,
+    "volume": 9000000
+  },
+  {
+    "symbol": "MCD",
+    "price": 285.3,
+    "volume": 7000000
+  },
+  {
+    "symbol": "META",
+    "price": 485.5,
+    "volume": 15000000
+  },
+  {
+    "symbol": "MSFT",
+    "price": 405.25,
+    "volume": 18000000
+  },
+  {
+    "symbol": "NVDA",
+    "price": 880.25,
+    "volume": 35000000
+  },
+  {
+    "symbol": "ORCL",
+    "price": 125.6,
+    "volume": 14000000
+  },
+  {
+    "symbol": "PFE",
+    "price": 28.75,
+    "volume": 25000000
+  },
+  {
+    "symbol": "TSLA",
+    "price": 250.3,
+    "volume": 40000000
+  },
+  {
+    "symbol": "UNH",
+    "price": 525.3,
+    "volume": 8000000
+  },
+  {
+    "symbol": "V",
+    "price": 280.45,
+    "volume": 12000000
+  },
+  {
+    "symbol": "WMT",
+    "price": 165.4,
+    "volume": 14000000
+  },
+  {
+    "symbol": "XOM",
+    "price": 105.8,
+    "volume": 20000000
+  }
+]

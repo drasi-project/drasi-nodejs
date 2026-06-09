@@ -1,0 +1,34 @@
+{
+  "name": "drasi-trading-demo",
+  "version": "0.1.0",
+  "description": "Self-contained Electron trading dashboard embedding @drasi/lib: real Postgres CDC + in-process price feed + synthetic joins, rendered live via an application reaction",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "db:up": "docker compose -f database/docker-compose.yml up -d --wait",
+    "db:down": "docker compose -f database/docker-compose.yml down -v",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "package": "electron-vite build && electron-builder"
+  },
+  "dependencies": {
+    "@drasi/lib": "file:../.."
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

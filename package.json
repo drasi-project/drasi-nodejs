@@ -1,0 +1,40 @@
+{
+  "name": "@drasi/lib",
+  "version": "0.1.0",
+  "description": "Embed the Drasi continuous-query engine in Node.js, with dynamic plugin loading and JavaScript-defined sources and reactions",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/drasi-project/drasi-nodejs.git"
+  },
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "types.d.ts"
+  ],
+  "napi": {
+    "binaryName": "drasi",
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform",
+    "build:release": "napi build --platform --release",
+    "pretest": "node scripts/build-plugins.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "lint": "cargo clippy -- -D warnings"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
