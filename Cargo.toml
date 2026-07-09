@@ -14,17 +14,20 @@ crate-type = ["cdylib"]
 napi = { version = "3", default-features = false, features = ["napi9", "tokio_rt", "serde-json"] }
 napi-derive = "3"
 
-# Drasi engine + dynamic plugin host SDK.
-# Path deps to the local drasi-core workspace (0.8.5 set) so the host and any
-# plugins built from the same source share an identical plugin SDK / FFI ABI.
-# NOTE: the currently published crates are version-skewed (host-sdk 0.8.4 vs
-# lib/plugin-sdk 0.8.5); switch these to fixed published versions once a
-# consistent set is released. See README "Dependency strategy".
-drasi-lib = { path = "../drasi-core/lib" }
-drasi-core = { path = "../drasi-core/core" }
-drasi-host-sdk = { path = "../drasi-core/components/host-sdk", features = ["watcher", "registry"] }
-drasi-plugin-sdk = { path = "../drasi-core/components/plugin-sdk" }
-drasi-state-store-redb = { path = "../drasi-core/components/state_stores/redb" }
+# Drasi engine + dynamic plugin host SDK, from crates.io.
+# The Drasi workspace versions its crates on independent lines (only host-sdk and
+# plugin-sdk track the shared workspace version), so the numbers below differ by
+# design; their published dependency requirements still unify to a single graph
+# (host-sdk 0.10 -> plugin-sdk 0.10 + drasi-lib ^0.8.8; drasi-lib 0.8 -> drasi-core
+# ^0.5.7). Exact versions are pinned in Cargo.lock. The example plugins used by the
+# test suite are likewise built from published crates (see scripts/build-plugins.mjs),
+# so the host and plugins share a matching plugin-SDK / FFI ABI (0.10) without a
+# local drasi-core checkout.
+drasi-lib = "0.8.9"
+drasi-core = "0.5.7"
+drasi-host-sdk = { version = "0.10.0", features = ["watcher", "registry"] }
+drasi-plugin-sdk = "0.10.0"
+drasi-state-store-redb = "0.2.4"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

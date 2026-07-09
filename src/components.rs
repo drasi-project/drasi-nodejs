@@ -315,8 +315,6 @@ impl BootstrapProvider for JsSourceBootstrap {
 
         Ok(BootstrapResult {
             event_count: count as usize,
-            last_sequence: if count > 0 { Some(count - 1) } else { None },
-            sequences_aligned: false,
             source_position: None,
         })
     }

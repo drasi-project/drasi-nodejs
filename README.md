@@ -19,9 +19,9 @@ binding around Drasi's embeddable engine (`drasi-lib`) and its host SDK
 
 ## Install / build
 
-This package builds a native addon and depends (for now) on a local checkout of
-[`drasi-core`](https://github.com/drasi-project/drasi-core) as a sibling directory
-(see _Dependency strategy_). Then:
+This package builds a native addon. Its Rust dependencies (the Drasi engine and
+plugin host SDK) come from crates.io, so no sibling checkout is required (see
+_Dependency strategy_). Then:
 
 ```bash
 npm install
@@ -131,12 +131,19 @@ Promises driven by a Tokio runtime.
 
 ## Dependency strategy
 
-The published Drasi crates are currently version-skewed (`drasi-host-sdk` 0.8.4 vs
-`drasi-lib`/`drasi-plugin-sdk` 0.8.5, which are ABI-incompatible). Until a
-consistent set is published, `Cargo.toml` uses **path dependencies** to a local
-`../drasi-core` checkout so the host and any plugins built from the same source
-share an identical plugin SDK / FFI ABI. Plugins must be built with
-`--features dynamic-plugin` and must match the host's plugin-SDK `major.minor`.
+The Drasi engine and host SDK are consumed from crates.io. The workspace versions
+its crates on independent lines — only `drasi-host-sdk` and `drasi-plugin-sdk`
+track the shared workspace version — so the pinned numbers differ by design
+(`drasi-host-sdk`/`drasi-plugin-sdk` 0.10, `drasi-lib` 0.8, `drasi-core` 0.5), yet
+their published dependency requirements resolve to a single coherent graph. Exact
+versions are locked in `Cargo.lock`.
+
+The FFI ABI is negotiated between `drasi-host-sdk` (host) and `drasi-plugin-sdk`
+(plugins), which always share the workspace version, so any plugin built against a
+matching `drasi-plugin-sdk` `major.minor` loads cleanly. The example plugins used
+by the test suite are fetched from crates.io and built with `--features
+dynamic-plugin` by `scripts/build-plugins.mjs` (the npm `pretest` step); bump their
+pinned versions alongside `drasi-plugin-sdk` when upgrading the SDK.
 
 ## Roadmap
 
@@ -155,7 +162,6 @@ Still to come:
 - Cross-platform prebuilt binaries (win/mac/linux × x64/arm64) published to npm.
 - Richer TypeScript types for configs/results (companion `types.d.ts` ships today);
   typed error codes.
-- Resolve the published-crate skew (needs `drasi-host-sdk` 0.8.5) to drop the path deps.
 
 ## License
 

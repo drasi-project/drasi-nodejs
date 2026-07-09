@@ -27,8 +27,28 @@ use drasi_plugin_sdk::ConfigValue as SdkConfigValue;
 
 /// Context passed to the host config resolver callback. Holds a channel to a
 /// dedicated resolver thread that owns the SDK resolvers.
+///
+/// The sender is wrapped in `Mutex<Option<..>>` so the owning engine can drop it
+/// at shutdown (see [`ConfigResolverContext::shutdown`]) — terminating the
+/// resolver thread — while leaving this struct itself intact. That matters
+/// because a plugin cdylib stores a raw pointer to this context in a
+/// process-global static that outlives the engine and the (never-unloaded)
+/// cdylib; the box must therefore stay leaked, but its thread need not.
 pub struct ConfigResolverContext {
-    resolver_tx: std::sync::mpsc::SyncSender<ResolveRequest>,
+    resolver_tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<ResolveRequest>>>,
+}
+
+impl ConfigResolverContext {
+    /// Terminate the dedicated resolver thread by dropping its sender. Idempotent.
+    ///
+    /// The context itself is intentionally NOT freed: a plugin cdylib holds a raw
+    /// pointer to it for the life of the process. After shutdown the resolver
+    /// callback returns a clean error instead of dereferencing freed memory.
+    pub fn shutdown(&self) {
+        // Dropping the SyncSender makes the resolver thread's `rx.recv()` return
+        // Err, ending its loop.
+        let _ = self.resolver_tx.lock().unwrap().take();
+    }
 }
 
 struct ResolveRequest {
@@ -64,7 +84,18 @@ pub extern "C" fn host_resolve_config_value(
         response_tx,
     };
 
-    if context.resolver_tx.send(request).is_err() {
+    // Clone the sender out from under the lock so we never hold it across the
+    // blocking round-trip below. A `None` sender means the host has shut the
+    // resolver down (see `ConfigResolverContext::shutdown`).
+    let sender = match context.resolver_tx.lock() {
+        Ok(guard) => match guard.as_ref() {
+            Some(tx) => tx.clone(),
+            None => return FfiGetSecretResult::err("Config resolver has been shut down".to_string()),
+        },
+        Err(_) => return FfiGetSecretResult::err("Config resolver lock poisoned".to_string()),
+    };
+
+    if sender.send(request).is_err() {
         return FfiGetSecretResult::err("Config resolver thread is no longer running".to_string());
     }
 
@@ -114,6 +145,8 @@ pub fn build_config_resolver_context(
         })
         .expect("Failed to spawn config-resolver thread");
 
-    let ctx = Box::new(ConfigResolverContext { resolver_tx: tx });
+    let ctx = Box::new(ConfigResolverContext {
+        resolver_tx: std::sync::Mutex::new(Some(tx)),
+    });
     Box::into_raw(ctx) as *mut c_void
 }

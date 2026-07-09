@@ -13,8 +13,8 @@
 
 mod components;
 mod conversions;
-mod engine;
+mod drasi;
 mod error;
 mod secrets;
 
-pub use engine::Drasi;
+pub use drasi::Drasi;

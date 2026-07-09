@@ -1,11 +1,9 @@
 # Build and test @drasi/lib.
 #
-# The package currently uses path dependencies to a sibling `drasi-core` checkout,
-# so CI clones it next to this repo. The npm `pretest` step builds the example
-# plugins from that checkout so the host and plugins share a matching plugin-SDK /
-# FFI ABI. Once a consistent set of Drasi crates is published to crates.io, the
-# `drasi-core` checkout can be removed and the Cargo deps switched to fixed
-# published versions.
+# Rust dependencies (the Drasi engine + plugin host SDK) come from crates.io, so no
+# sibling checkout is needed. The npm `pretest` step fetches the example plugin
+# crates from crates.io and builds them so the host and plugins share a matching
+# plugin-SDK / FFI ABI.
 
 name: CI
 
@@ -30,14 +28,6 @@ jobs:
     steps:
       - name: Checkout drasi-nodejs
         uses: actions/checkout@v4
-        with:
-          path: drasi-nodejs
-
-      - name: Checkout drasi-core (sibling)
-        uses: actions/checkout@v4
-        with:
-          repository: drasi-project/drasi-core
-          path: drasi-core
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -49,21 +39,17 @@ jobs:
           node-version: 20
 
       - name: Install deps
-        working-directory: drasi-nodejs
         run: npm install
 
       - name: Clippy
-        working-directory: drasi-nodejs
         run: cargo clippy -- -D warnings
 
       - name: Build addon
-        working-directory: drasi-nodejs
         run: npm run build
 
       - name: Test (pretest builds + stages example plugins)
-        working-directory: drasi-nodejs
         run: npm test
 
   # Cross-platform prebuilt binaries for npm publishing are a roadmap item.
   # `@napi-rs/cli` supports a build matrix + per-platform optional-dependency
-  # packages; wire it up here once a consistent published Drasi crate set exists.
+  # packages; wire it up here as a follow-up.

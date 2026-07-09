@@ -350,3 +350,40 @@ test('watchPlugins hot-loads a newly added plugin', async () => {
   assert.ok(loaded, 'mock source hot-loaded via watcher');
   await d.stop();
 });
+
+// Regression tests for per-instance resource cleanup: the config-resolver
+// context/thread is created lazily (only when cdylib plugins are loaded) and
+// its OS thread is reclaimed on close()/drop. These guard against the lazy-init
+// and shutdown paths breaking secret resolution or close() idempotency.
+
+test('close() is clean for a pure-JS instance (no resolver ever created)', async () => {
+  const d = await Drasi.create('t-nojs-resolver');
+  await d.start();
+  await d.addJsSource('s');
+  await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['s']);
+  await d.pushChange('s', { op: 'insert', id: 'n1', labels: ['Thing'], properties: { name: 'x' } });
+  await waitForRows(d, 'q', (rows) => rows.length === 1);
+  // Never loaded a cdylib plugin, so shutdown_config_resolver() must no-op.
+  await d.close();
+  // close() must be idempotent.
+  await d.close();
+  assert.ok(true, 'pure-JS instance closed cleanly and idempotently');
+});
+
+test('secret resolution works across many create/close cycles', async () => {
+  // Each cycle lazily spins up (and, on close, reclaims) a fresh resolver
+  // thread. Resolution must keep working every iteration.
+  for (let i = 0; i < 12; i++) {
+    const d = await Drasi.create(`t-cycle-${i}`, { secrets: { INTERVAL: '100' } });
+    await d.loadPlugins(pluginsDir);
+    await d.start();
+    await d.addSource('mock', 'src', {
+      dataType: { type: 'counter' },
+      intervalMs: { kind: 'Secret', name: 'INTERVAL' },
+    });
+    await d.addQuery('q', 'MATCH (c:Counter) RETURN c.value AS value', ['src']);
+    const rows = await waitForRows(d, 'q', (r) => r.length > 0);
+    assert.ok(rows.length > 0, `cycle ${i} resolved its secret and produced results`);
+    await d.close();
+  }
+});
