@@ -10,7 +10,7 @@
 //! cdylib plugins, and supports JavaScript-defined sources and reactions.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use napi_derive::napi;use serde_json::Value;
 use tokio::sync::mpsc;
@@ -29,7 +29,7 @@ use drasi_plugin_sdk::{
 use crate::components::{JsReaction, JsResultFn, JsSource};
 use crate::conversions::json_to_source_change;
 use crate::error::{reason, to_napi};
-use crate::secrets::{build_config_resolver_context, config_resolver_callback};
+use crate::secrets::{build_config_resolver_context, config_resolver_callback, ConfigResolverContext};
 
 /// File patterns for discovering cdylib plugins (Unix + Windows naming).
 const PLUGIN_FILE_PATTERNS: &[&str] = &[
@@ -65,12 +65,76 @@ struct Inner {
     watchers: Mutex<Vec<PluginWatcher>>,
     /// Maps a plugin file path to the kinds it registered (for watcher removal).
     plugin_files: Mutex<HashMap<String, PluginFileKinds>>,
+    /// Secret store provider, retained so the plugin contexts below can be built
+    /// lazily on first plugin load rather than eagerly for every instance.
+    secret_provider: Arc<dyn SecretStoreProvider>,
+    /// This engine instance's id, used when lazily building the callback context.
+    instance_id: String,
     /// Leaked `ConfigResolverContext` pointer (process-lifetime) injected into
     /// plugins so they can resolve `ConfigValue::Secret`/`EnvironmentVariable`.
-    resolver_ctx: usize,
-    /// Leaked `CallbackContext` pointer routing plugin logs/lifecycle events
-    /// into DrasiLib's log registry.
-    callback_ctx: usize,
+    ///
+    /// Created lazily (only when cdylib plugins are actually loaded) so pure-JS
+    /// instances allocate nothing and spawn no resolver thread. The box stays
+    /// leaked for the life of the process because plugins retain a raw pointer to
+    /// it, but its OS thread is reclaimed on drop via `shutdown_config_resolver`.
+    resolver_ctx: OnceLock<usize>,
+    /// Leaked `CallbackContext` pointer routing plugin logs/lifecycle events into
+    /// DrasiLib's log registry. Created lazily alongside `resolver_ctx`.
+    callback_ctx: OnceLock<usize>,
+}
+
+impl Inner {
+    /// Lazily build (exactly once) the leaked config-resolver and callback
+    /// contexts that cdylib plugins require, returning their raw pointers.
+    ///
+    /// These are created only when plugins are actually loaded, so pure-JS
+    /// instances never allocate them or spawn a resolver thread. A loaded plugin
+    /// stores the returned pointers in process-global statics that outlive this
+    /// instance and the never-unloaded cdylib, so the boxes must stay leaked for
+    /// the life of the process. The resolver's OS thread, however, is reclaimed
+    /// on drop/close via [`Inner::shutdown_config_resolver`].
+    fn ensure_plugin_contexts(&self) -> (usize, usize) {
+        let resolver_ctx = *self.resolver_ctx.get_or_init(|| {
+            build_config_resolver_context(
+                self.secret_provider.clone(),
+                tokio::runtime::Handle::current(),
+            ) as usize
+        });
+        let callback_ctx = *self.callback_ctx.get_or_init(|| {
+            Arc::new(drasi_host_sdk::CallbackContext {
+                instance_id: self.instance_id.clone(),
+                runtime_handle: tokio::runtime::Handle::current(),
+                log_registry: self.drasi.log_registry(),
+                source_event_history: Arc::new(tokio::sync::RwLock::new(
+                    drasi_lib::managers::ComponentEventHistory::new(),
+                )),
+                reaction_event_history: Arc::new(tokio::sync::RwLock::new(
+                    drasi_lib::managers::ComponentEventHistory::new(),
+                )),
+            })
+            .into_raw() as usize
+        });
+        (resolver_ctx, callback_ctx)
+    }
+
+    /// Terminate the config-resolver OS thread if one was started. Idempotent, so
+    /// it is safe to call from both `close()` and `Drop`.
+    fn shutdown_config_resolver(&self) {
+        if let Some(&ptr) = self.resolver_ctx.get() {
+            // SAFETY: the context box is intentionally leaked (never freed) for
+            // the life of the process, so this pointer is always valid.
+            unsafe { &*(ptr as *const ConfigResolverContext) }.shutdown();
+        }
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // Reclaim the per-instance resolver thread when the engine is dropped.
+        // The leaked context boxes remain (a plugin cdylib holds raw pointers to
+        // them for the life of the process); only the OS thread is reclaimed.
+        self.shutdown_config_resolver();
+    }
 }
 
 /// The embedded Drasi engine, exposed to JavaScript.
@@ -104,9 +168,8 @@ impl Drasi {
         }
         let provider: Arc<dyn SecretStoreProvider> = Arc::new(store);
 
-        let instance_id = id.clone();
         let mut builder = DrasiLib::builder()
-            .with_id(id)
+            .with_id(id.clone())
             .with_secret_store_provider(provider.clone());
 
         // Optional persistent state store, e.g. { stateStore: { kind: 'redb', path: '...' } }.
@@ -128,26 +191,9 @@ impl Drasi {
 
         let core = builder.build().await.map_err(to_napi)?;
 
-        // Build a host config-resolver context (env + secrets) and remember its
-        // leaked pointer so loaded plugins can be wired to resolve ConfigValues.
-        let resolver_ctx =
-            build_config_resolver_context(provider, tokio::runtime::Handle::current()) as usize;
-
-        // Build a callback context so plugin logs/lifecycle events are routed
-        // into this instance's log registry (readable via on*Logs).
-        let callback_ctx = Arc::new(drasi_host_sdk::CallbackContext {
-            instance_id,
-            runtime_handle: tokio::runtime::Handle::current(),
-            log_registry: core.log_registry(),
-            source_event_history: Arc::new(tokio::sync::RwLock::new(
-                drasi_lib::managers::ComponentEventHistory::new(),
-            )),
-            reaction_event_history: Arc::new(tokio::sync::RwLock::new(
-                drasi_lib::managers::ComponentEventHistory::new(),
-            )),
-        })
-        .into_raw() as usize;
-
+        // The config-resolver and callback contexts are built lazily on first
+        // plugin load (see `Inner::ensure_plugin_contexts`), so instances that
+        // never load cdylib plugins spawn no resolver thread and leak nothing.
         Ok(Drasi {
             inner: Arc::new(Inner {
                 drasi: Arc::new(core),
@@ -157,8 +203,10 @@ impl Drasi {
                 js_source_senders: Mutex::new(HashMap::new()),
                 watchers: Mutex::new(Vec::new()),
                 plugin_files: Mutex::new(HashMap::new()),
-                resolver_ctx,
-                callback_ctx,
+                secret_provider: provider,
+                instance_id: id,
+                resolver_ctx: OnceLock::new(),
+                callback_ctx: OnceLock::new(),
             }),
         })
     }
@@ -899,8 +947,9 @@ impl Drasi {
         Ok(())
     }
 
-    /// Stop the engine and release host resources (plugin watchers and JS source
-    /// channels). After `close()`, the instance should not be used further.
+    /// Stop the engine and release host resources (plugin watchers, JS source
+    /// channels, and the config-resolver thread). After `close()`, the instance
+    /// should not be used further.
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
         if self.inner.drasi.is_running().await {
@@ -908,6 +957,9 @@ impl Drasi {
         }
         self.inner.watchers.lock().unwrap().clear();
         self.inner.js_source_senders.lock().unwrap().clear();
+        // Terminate the resolver thread now (deterministic reclaim). `Drop`
+        // repeats this for the GC path; both calls are idempotent.
+        self.inner.shutdown_config_resolver();
         Ok(())
     }
 }
@@ -965,10 +1017,14 @@ fn load_dir_into(
     };
     let loader = PluginLoader::new(config);
 
+    // Build (once) and fetch the leaked contexts plugins need to route logs and
+    // resolve config values back through this host instance.
+    let (resolver_ctx, callback_ctx) = inner.ensure_plugin_contexts();
+
     let loaded = loader.load_all(
-        inner.callback_ctx as *mut std::ffi::c_void,
+        callback_ctx as *mut std::ffi::c_void,
         callbacks::default_log_callback_fn(),
-        inner.callback_ctx as *mut std::ffi::c_void,
+        callback_ctx as *mut std::ffi::c_void,
         callbacks::default_lifecycle_callback_fn(),
     )?;
 
@@ -981,7 +1037,7 @@ fn load_dir_into(
         // Wire the plugin to resolve ConfigValue::Secret / EnvironmentVariable
         // references through the host before any source/reaction is created.
         plugin.inject_config_resolver(
-            inner.resolver_ctx as *mut std::ffi::c_void,
+            resolver_ctx as *mut std::ffi::c_void,
             config_resolver_callback(),
         );
         for proxy in std::mem::take(&mut plugin.source_plugins) {
