@@ -82,8 +82,10 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # Route through the npm script so build flags (e.g. --no-const-enum) stay
+      # single-sourced in package.json and never drift from local/CI builds.
       - name: Build addon
-        run: npx napi build --platform --release --target ${{ matrix.target }}
+        run: npm run build:release -- --target ${{ matrix.target }}
         shell: bash
 
       - name: Upload binary
