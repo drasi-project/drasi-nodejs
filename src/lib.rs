@@ -16,5 +16,6 @@ mod conversions;
 mod drasi;
 mod error;
 mod secrets;
+mod types;
 
 pub use drasi::Drasi;

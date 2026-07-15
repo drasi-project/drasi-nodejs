@@ -10,12 +10,13 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 use drasi_lib::sources::convert_json_to_element_value;
 use serde_json::Value;
+
+use crate::error::{CodedReason, DrasiErrorCode};
 
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
@@ -53,21 +54,26 @@ fn properties_from(value: Option<&Value>) -> ElementPropertyMap {
 /// ```json
 /// { "op": "insert" | "update" | "delete", "id": "n1", "labels": ["Thing"], "properties": { "x": 1 } }
 /// ```
-pub fn json_to_source_change(source_id: &str, input: &Value) -> Result<SourceChange> {
-    let obj = input
-        .as_object()
-        .ok_or_else(|| anyhow!("change must be an object"))?;
+pub fn json_to_source_change(source_id: &str, input: &Value) -> Result<SourceChange, CodedReason> {
+    let obj = input.as_object().ok_or_else(|| {
+        CodedReason::new(DrasiErrorCode::ChangeNotObject, "change must be an object")
+    })?;
 
     let op = obj
         .get("op")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("change.op is required (insert|update|delete)"))?
+        .ok_or_else(|| {
+            CodedReason::new(
+                DrasiErrorCode::ChangeOpRequired,
+                "change.op is required (insert|update|delete)",
+            )
+        })?
         .to_ascii_lowercase();
 
     let id = obj
         .get("id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("change.id is required"))?;
+        .ok_or_else(|| CodedReason::new(DrasiErrorCode::ChangeIdRequired, "change.id is required"))?;
 
     let reference = ElementReference::new(source_id, id);
     let labels = labels_from(obj.get("labels"));
@@ -90,7 +96,7 @@ pub fn json_to_source_change(source_id: &str, input: &Value) -> Result<SourceCha
         .or_else(|| obj.get("outId"))
         .and_then(|v| v.as_str());
 
-    let build_element = |metadata: ElementMetadata| -> Result<Element> {
+    let build_element = |metadata: ElementMetadata| -> Result<Element, CodedReason> {
         let properties = properties_from(obj.get("properties"));
         match (start, end) {
             (Some(s), Some(e)) => Ok(Element::Relation {
@@ -103,8 +109,9 @@ pub fn json_to_source_change(source_id: &str, input: &Value) -> Result<SourceCha
                 metadata,
                 properties,
             }),
-            _ => Err(anyhow!(
-                "a relation change requires both startId and endId"
+            _ => Err(CodedReason::new(
+                DrasiErrorCode::RelationRequiresBothEnds,
+                "a relation change requires both startId and endId",
             )),
         }
     };
@@ -117,8 +124,9 @@ pub fn json_to_source_change(source_id: &str, input: &Value) -> Result<SourceCha
             element: build_element(metadata)?,
         }),
         "delete" | "remove" => Ok(SourceChange::Delete { metadata }),
-        other => Err(anyhow!(
-            "unknown change.op '{other}' (expected insert|update|delete)"
+        other => Err(CodedReason::new(
+            DrasiErrorCode::UnknownChangeOp,
+            format!("unknown change.op '{other}' (expected insert|update|delete)"),
         )),
     }
 }

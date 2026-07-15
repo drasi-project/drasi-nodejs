@@ -126,11 +126,15 @@ test('addSource with unknown bootstrap kind errors clearly', async () => {
   await d.loadPlugins(pluginsDir);
   await d.start();
   await assert.rejects(
-    () =>
+    async () =>
       d.addSource('mock', 'src', { dataType: { type: 'counter' }, intervalMs: 100 }, true, {
         kind: 'nope',
       }),
-    /unknown bootstrap kind 'nope'/,
+    (err) => {
+      assert.equal(err.code, 'UNKNOWN_BOOTSTRAP_KIND', 'typed error code on err.code');
+      assert.match(err.message, /unknown bootstrap kind 'nope'/);
+      return true;
+    },
   );
   await d.stop();
 });
@@ -327,10 +331,57 @@ test('fromConfig builds a running topology declaratively', async () => {
 test('unknown plugin kind reports a clear error', async () => {
   const d = await Drasi.create('t-error');
   await assert.rejects(
-    () => d.addSource('does-not-exist', 'src', {}),
-    /unknown source kind 'does-not-exist'/,
+    async () => d.addSource('does-not-exist', 'src', {}),
+    (err) => {
+      assert.equal(err.code, 'UNKNOWN_SOURCE_KIND', 'typed error code on err.code');
+      assert.match(err.message, /unknown source kind 'does-not-exist'/);
+      return true;
+    },
   );
   await d.stop();
+});
+
+test('validation errors expose stable typed err.code values', async () => {
+  const expectCode = async (fn, code, messageRe) =>
+    assert.rejects(async () => fn(), (err) => {
+      assert.equal(err.code, code, `expected code ${code}, got ${err.code}`);
+      if (messageRe) assert.match(err.message, messageRe);
+      return true;
+    });
+
+  // Construction-time validation (synchronous).
+  await expectCode(
+    () => Drasi.create('t-ss1', { stateStore: { kind: 'bogus' } }),
+    'UNKNOWN_STATE_STORE_KIND',
+    /unknown stateStore kind 'bogus'/,
+  );
+  await expectCode(
+    () => Drasi.create('t-ss2', { stateStore: { kind: 'redb' } }),
+    'STATE_STORE_PATH_REQUIRED',
+    /stateStore\.path is required/,
+  );
+
+  const d = await Drasi.create('t-codes');
+
+  // Source / reaction kind lookups.
+  await expectCode(() => d.addReaction('nope', 'r', ['q'], {}), 'UNKNOWN_REACTION_KIND');
+  await expectCode(() => d.updateSource('nope', 's', {}), 'UNKNOWN_SOURCE_KIND');
+
+  // pushChange: unknown source, then change-shape validation.
+  await expectCode(() => d.pushChange('missing', { op: 'insert', id: 'n1' }), 'NO_JS_SOURCE');
+
+  await d.addJsSource('js');
+  await d.start();
+  await expectCode(() => d.pushChange('js', 42), 'CHANGE_NOT_OBJECT');
+  await expectCode(() => d.pushChange('js', { id: 'n1' }), 'CHANGE_OP_REQUIRED');
+  await expectCode(() => d.pushChange('js', { op: 'insert' }), 'CHANGE_ID_REQUIRED');
+  await expectCode(() => d.pushChange('js', { op: 'frobnicate', id: 'n1' }), 'UNKNOWN_CHANGE_OP');
+  await expectCode(
+    () => d.pushChange('js', { op: 'insert', id: 'e1', startId: 'a' }),
+    'RELATION_REQUIRES_BOTH_ENDS',
+  );
+
+  await d.close();
 });
 
 test('watchPlugins hot-loads a newly added plugin', async () => {

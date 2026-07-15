@@ -11,8 +11,7 @@
   "types": "index.d.ts",
   "files": [
     "index.js",
-    "index.d.ts",
-    "types.d.ts"
+    "index.d.ts"
   ],
   "napi": {
     "binaryName": "drasi",
@@ -29,10 +28,12 @@
     "build:release": "napi build --platform --release",
     "pretest": "node scripts/build-plugins.mjs",
     "test": "node --test",
+    "test:types": "tsc --noEmit --strict --target es2022 --moduleResolution node index.d.ts test/types.test-d.ts",
     "lint": "cargo clippy -- -D warnings"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.7.0"
+    "@napi-rs/cli": "^3.7.0",
+    "typescript": "^5"
   },
   "engines": {
     "node": ">=18"

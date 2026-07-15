@@ -109,16 +109,30 @@ auto-start individually. (Adding everything and then calling `start()` also work
 
 ## Types
 
-Companion helper types are available in `types.d.ts` for config and callback
-shapes that the generated `index.d.ts` currently exposes as `any`.
+The generated `index.d.ts` is self-contained: every config/result parameter and
+return, plus the callback payloads, is exposed with a concrete TypeScript type
+(no bare `any`). Import them directly from the package.
 
 ```ts
-import type { SourceChangeInput, QueryResultEvent } from '@drasi/lib/types.d.ts';
+import type { SourceChangeInput, QueryResultEvent } from '@drasi/lib';
 const change: SourceChangeInput = { op: 'insert', id: 'o1', labels: ['Order'] };
 const onResult = (event: QueryResultEvent) => console.log(event.results.length);
 ```
 
-They can also be referenced with a `/// <reference path="..." />` directive.
+Errors thrown by validation carry a stable, machine-readable code on `err.code`
+(see the exported `DrasiErrorCode`), so callers can branch on the code instead of
+string-matching messages:
+
+```ts
+import { DrasiErrorCode } from '@drasi/lib';
+try {
+  await drasi.addSource('unknown', 's', {});
+} catch (err) {
+  if ((err as { code?: string }).code === DrasiErrorCode.UnknownSourceKind) {
+    // handle the unregistered-kind case
+  }
+}
+```
 
 ## How it works
 
@@ -160,8 +174,6 @@ Still to come:
 - RocksDB index provider; durable (checkpointed) JS reactions.
 - Identity providers; declarative config-schema validation.
 - Cross-platform prebuilt binaries (win/mac/linux × x64/arm64) published to npm.
-- Richer TypeScript types for configs/results (companion `types.d.ts` ships today);
-  typed error codes.
 
 ## License
 
