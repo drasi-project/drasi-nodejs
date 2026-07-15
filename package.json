@@ -27,6 +27,9 @@
   "scripts": {
     "build": "napi build --platform",
     "build:release": "napi build --platform --release",
+    "artifacts": "napi artifacts",
+    "prepublishOnly": "napi prepublish -t npm",
+    "version": "napi version",
     "pretest": "node scripts/build-plugins.mjs",
     "test": "node --test \"test/*.test.mjs\"",
     "lint": "cargo clippy -- -D warnings"
@@ -36,5 +39,9 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }
