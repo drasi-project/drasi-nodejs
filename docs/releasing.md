@@ -65,12 +65,14 @@ Releases are automated by [`.github/workflows/release.yml`](../.github/workflows
 - **`build` matrix:** builds the addon for all five targets
   (`napi build --platform --release --target <triple>`) on matching **native
   runners** — Windows x64, macOS x64 (`macos-13`) and arm64 (`macos-14`), Linux x64
-  (`ubuntu-latest`) and arm64 (`ubuntu-24.04-arm`). Native runners are used instead
+  (`ubuntu-22.04`) and arm64 (`ubuntu-22.04-arm`). Native runners are used instead
   of cross-compilation because the dependency tree includes C/assembly crates (e.g.
   `aws-lc-sys`) whose cross builds are fragile. It uploads each `.node` plus the
-  loader/types as workflow artifacts. (Consequence: the prebuilt Linux binaries
-  require a glibc at least as new as the Ubuntu runner's; if broader compatibility
-  is needed, switch the Linux jobs to `--use-napi-cross` or a manylinux/zig setup.)
+  loader/types as workflow artifacts. The Linux jobs are pinned to **Ubuntu 22.04
+  (glibc 2.35)**, so the prebuilt Linux binaries require **glibc >= 2.35**
+  (Ubuntu 22.04 / Debian 12 / RHEL 9 and newer). If an even lower glibc floor is
+  ever required, build the Linux targets in a manylinux container (or via
+  `--use-napi-cross`/zig, mindful of the `aws-lc-sys` cross-build caveats above).
 - **`publish` job** (tag pushes only): downloads all artifacts, runs
   `napi create-npm-dirs` + `napi artifacts` to assemble the per-platform packages,
   then `npm publish`. The `prepublishOnly` hook (`napi prepublish -t npm`)

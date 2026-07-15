@@ -11,9 +11,9 @@
 # Every target is built on a matching native runner (no cross-compilation). The
 # dependency tree includes C/assembly crates (e.g. aws-lc-sys) whose cross builds
 # are fragile, and the native build path is already exercised by ci.yml, so native
-# runners are the most reliable choice. Consumers therefore need a glibc at least
-# as new as the Ubuntu runner's; see docs/releasing.md if broader compatibility is
-# ever required.
+# runners are the most reliable choice. The Linux jobs are pinned to Ubuntu 22.04
+# (glibc 2.35) to lower the glibc floor for the prebuilt binaries; see
+# docs/releasing.md if an even lower floor is ever required.
 
 name: Release
 
@@ -47,9 +47,9 @@ jobs:
             target: x86_64-apple-darwin
           - host: macos-14
             target: aarch64-apple-darwin
-          - host: ubuntu-latest
+          - host: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-          - host: ubuntu-24.04-arm
+          - host: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.host }}
     steps:
