@@ -24,8 +24,8 @@
     ]
   },
   "scripts": {
-    "build": "napi build --platform --no-const-enum",
-    "build:release": "napi build --platform --release --no-const-enum",
+    "build": "napi build --platform --no-const-enum --runtime-string-enum",
+    "build:release": "napi build --platform --release --no-const-enum --runtime-string-enum",
     "pretest": "node scripts/build-plugins.mjs",
     "test": "node --test",
     "test:types": "tsc --noEmit --strict --isolatedModules --target es2022 --moduleResolution node index.d.ts test/types.test-d.ts",

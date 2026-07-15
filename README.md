@@ -123,17 +123,17 @@ const onResult = (event: QueryResultEvent) => console.log(event.results.length);
 
 Argument/validation failures throw a stable, machine-readable **code** so callers
 can branch on it instead of matching human-readable messages. `DrasiErrorCode` is
-exported as a string-literal **union type** (no runtime `const enum`, so it is
-safe under `isolatedModules` / esbuild / swc / Vite):
+exported as a regular (non-`const`) `enum` with string values — it is safe under
+`isolatedModules` / esbuild / swc / Vite and has a real runtime value, so both the
+type and value are usable:
 
 ```ts
-import type { DrasiErrorCode } from '@drasi/lib';
+import { DrasiErrorCode } from '@drasi/lib';
 
 try {
   await drasi.addSource('unknown', 's', {});
 } catch (err) {
-  const code = (err as { code?: string }).code as DrasiErrorCode | undefined;
-  if (code === 'UNKNOWN_SOURCE_KIND') {
+  if ((err as { code?: string }).code === DrasiErrorCode.UnknownSourceKind) {
     // handle the unregistered-kind case
   }
 }

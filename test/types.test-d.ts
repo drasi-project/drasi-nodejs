@@ -4,13 +4,12 @@
 // public types and uses them so any regression to `any`, a missing type, or a
 // changed shape fails the type-check. Nothing here executes at runtime.
 
-import { Drasi } from '../index.js'
+import { Drasi, DrasiErrorCode } from '../index.js'
 import type {
   BootstrapConfig,
   ComponentStatusEntry,
   CreateOptions,
   DrasiConfig,
-  DrasiErrorCode,
   LifecycleMetrics,
   LoadPluginsResult,
   LogMessage,
@@ -136,20 +135,21 @@ async function streaming(d: Drasi): Promise<void> {
   })
 }
 
-// Error codes: the exported `DrasiErrorCode` is a string-literal union, so
-// consumers branch on the typed `err.code` string directly (no runtime enum,
-// isolatedModules-safe). The `satisfies` checks assert each literal is a valid
-// member of the union.
+// Error codes: `DrasiErrorCode` is a regular (non-const) enum, so it is
+// isolatedModules-safe, has a runtime value, and can be compared against the
+// plain `string` `err.code`. Consumers may also compare against the string
+// literals directly.
 function classify(err: unknown): string {
   const code = (err as { code?: string }).code
-  if (code === ('UNKNOWN_SOURCE_KIND' satisfies DrasiErrorCode)) return 'unknown-source'
-  if (code === ('NO_JS_SOURCE' satisfies DrasiErrorCode)) return 'no-js-source'
-  if (code === ('CHANGE_OP_REQUIRED' satisfies DrasiErrorCode)) return 'bad-change'
+  if (code === DrasiErrorCode.UnknownSourceKind) return 'unknown-source'
+  if (code === DrasiErrorCode.NoJsSource) return 'no-js-source'
+  if (code === DrasiErrorCode.ChangeOpRequired) return 'bad-change'
   return 'other'
 }
 
-// A value typed as the union accepts valid codes and rejects unknown strings.
-const someCode: DrasiErrorCode = 'JS_SOURCE_CLOSED'
+// The enum member value is the stable string code.
+const someCode: DrasiErrorCode = DrasiErrorCode.JsSourceClosed
+const asString: string = someCode
 
 const stateStore: StateStoreOptions = { kind: 'redb', path: '/tmp/x' }
 
@@ -163,5 +163,6 @@ export {
   streaming,
   classify,
   someCode,
+  asString,
   stateStore,
 }

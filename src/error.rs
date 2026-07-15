@@ -31,10 +31,12 @@ use napi_derive::napi;
 
 /// Stable, machine-readable error codes surfaced on `err.code`.
 ///
-/// Built with `#[napi(string_enum)]` but emitted into the generated `index.d.ts`
-/// (via `napi build --no-const-enum`) as a **string-literal union type**, giving
-/// TypeScript consumers a typed, runtime-free set to branch on — safe under
-/// `isolatedModules` (no `const enum`).
+/// Built with `#[napi(string_enum)]` and emitted into the generated `index.d.ts`
+/// (via `napi build --no-const-enum --runtime-string-enum`) as a **regular
+/// ambient `enum`** — never a `const enum`. This is safe under `isolatedModules`
+/// (Babel/esbuild/swc/Vite), carries a real runtime value that matches the object
+/// napi registers in `index.js`, and lets consumers compare
+/// `err.code === DrasiErrorCode.UnknownSourceKind`.
 #[napi(string_enum)]
 #[derive(Clone, Copy)]
 pub enum DrasiErrorCode {
