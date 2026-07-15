@@ -87,6 +87,9 @@ on the embedded engine.
 in-memory secret store (`{ secrets: { DB_PASSWORD: '…' } }`) that cdylib plugins
 resolve `ConfigValue::Secret`/`EnvironmentVariable` references against;
 `options.stateStore` (`{ kind: 'redb', path }`) enables a persistent plugin state store.
+`Drasi.fromConfig(config)` builds **and starts** an engine from a declarative
+object (see [`docs/api-reference.md`](./docs/api-reference.md) for the full,
+method-by-method reference).
 
 | Area | Methods |
 | --- | --- |
@@ -94,6 +97,7 @@ resolve `ConfigValue::Secret`/`EnvironmentVariable` references against;
 | Sources | `addSource(kind, id, config, autoStart?, bootstrap?)`, `addJsSource(id, autoStart?)`, `pushChange(sourceId, change)`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources` |
 | Queries | `addQuery(id, query, sources, language?, joins?)`, `updateQuery`, `startQuery`, `stopQuery`, `removeQuery`, `getQueryResults(id)`, `listQueries` |
 | Reactions | `addReaction(kind, id, queryIds, config)`, `addJsReaction(id, queryIds, cb)`, `updateReaction`, `startReaction`, `stopReaction`, `removeReaction`, `listReactions` |
+| Metrics | `getQueryMetrics(id)`, `getReactionMetrics(id)`, `getLifecycleMetrics()` |
 | Streaming | `onAllEvents(cb)`, `onQueryEvents(id, cb)`, `onSourceEvents(id, cb)`, `onReactionEvents(id, cb)`, `onSourceLogs(id, cb)`, `onQueryLogs(id, cb)`, `onReactionLogs(id, cb)` |
 | Lifecycle | `start()`, `stop()`, `close()` |
 
