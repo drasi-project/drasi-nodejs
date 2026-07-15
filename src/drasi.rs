@@ -707,10 +707,12 @@ impl Drasi {
             .map_err(to_napi)
     }
 
-    /// Add a JavaScript-defined reaction. `callback` is an error-first function
-    /// `(err, resultJson) => void` invoked for every query result, where
-    /// `resultJson` is a JSON-serialized query result.
-    #[napi]
+    /// Add a JavaScript-defined reaction. `callback` is a value-only function
+    /// `(result) => void` invoked once per non-empty query-result batch, where
+    /// `result` is the structured query result
+    /// `{ query_id, sequence, timestamp, results, metadata }`. The callback is
+    /// registered unref'd, so it does not keep the Node.js event loop alive.
+    #[napi(ts_args_type = "id: string, queryIds: Array<string>, callback: (result: any) => void")]
     pub async fn add_js_reaction(
         &self,
         id: String,
@@ -857,7 +859,7 @@ impl Drasi {
     // ------------------------------------------------------------------
 
     /// Stream **all** component lifecycle events to a JS callback `(event) => …`.
-    #[napi]
+    #[napi(ts_args_type = "callback: (event: any) => void")]
     pub async fn on_all_events(&self, callback: JsResultFn) -> napi::Result<()> {
         let stream = self.inner.drasi.get_all_events().await.map_err(to_napi)?;
         spawn_event_forwarder(stream, callback);
@@ -865,7 +867,7 @@ impl Drasi {
     }
 
     /// Stream lifecycle/status events for a specific query to a JS callback.
-    #[napi]
+    #[napi(ts_args_type = "id: string, callback: (event: any) => void")]
     pub async fn on_query_events(&self, id: String, callback: JsResultFn) -> napi::Result<()> {
         let stream = self.inner.drasi.get_query_events(&id).await.map_err(to_napi)?;
         spawn_event_forwarder(stream, callback);
@@ -873,7 +875,7 @@ impl Drasi {
     }
 
     /// Stream lifecycle/status events for a specific source to a JS callback.
-    #[napi]
+    #[napi(ts_args_type = "id: string, callback: (event: any) => void")]
     pub async fn on_source_events(&self, id: String, callback: JsResultFn) -> napi::Result<()> {
         let stream = self.inner.drasi.get_source_events(&id).await.map_err(to_napi)?;
         spawn_event_forwarder(stream, callback);
@@ -881,7 +883,7 @@ impl Drasi {
     }
 
     /// Stream lifecycle/status events for a specific reaction to a JS callback.
-    #[napi]
+    #[napi(ts_args_type = "id: string, callback: (event: any) => void")]
     pub async fn on_reaction_events(&self, id: String, callback: JsResultFn) -> napi::Result<()> {
         let stream = self
             .inner
@@ -894,7 +896,7 @@ impl Drasi {
     }
 
     /// Stream log messages for a specific source (including its plugin's logs).
-    #[napi]
+    #[napi(ts_args_type = "id: string, callback: (log: any) => void")]
     pub async fn on_source_logs(&self, id: String, callback: JsResultFn) -> napi::Result<()> {
         let (history, rx) = self
             .inner
@@ -907,7 +909,7 @@ impl Drasi {
     }
 
     /// Stream log messages for a specific query.
-    #[napi]
+    #[napi(ts_args_type = "id: string, callback: (log: any) => void")]
     pub async fn on_query_logs(&self, id: String, callback: JsResultFn) -> napi::Result<()> {
         let (history, rx) = self
             .inner
@@ -920,7 +922,7 @@ impl Drasi {
     }
 
     /// Stream log messages for a specific reaction.
-    #[napi]
+    #[napi(ts_args_type = "id: string, callback: (log: any) => void")]
     pub async fn on_reaction_logs(&self, id: String, callback: JsResultFn) -> napi::Result<()> {
         let (history, rx) = self
             .inner
