@@ -24,11 +24,11 @@
     ]
   },
   "scripts": {
-    "build": "napi build --platform",
-    "build:release": "napi build --platform --release",
+    "build": "napi build --platform --no-const-enum",
+    "build:release": "napi build --platform --release --no-const-enum",
     "pretest": "node scripts/build-plugins.mjs",
     "test": "node --test",
-    "test:types": "tsc --noEmit --strict --target es2022 --moduleResolution node index.d.ts test/types.test-d.ts",
+    "test:types": "tsc --noEmit --strict --isolatedModules --target es2022 --moduleResolution node index.d.ts test/types.test-d.ts",
     "lint": "cargo clippy -- -D warnings"
   },
   "devDependencies": {

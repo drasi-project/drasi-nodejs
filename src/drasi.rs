@@ -31,7 +31,7 @@ use drasi_plugin_sdk::{
 
 use crate::components::{JsReaction, JsResultFn, JsSource};
 use crate::conversions::json_to_source_change;
-use crate::error::{throw_coded, to_napi, DrasiErrorCode};
+use crate::error::{coded_message, throw_coded, to_napi, DrasiErrorCode};
 use crate::secrets::{build_config_resolver_context, config_resolver_callback, ConfigResolverContext};
 
 /// File patterns for discovering cdylib plugins (Unix + Windows naming).
@@ -529,7 +529,10 @@ impl Drasi {
 
         env.spawn_future(async move {
             tx.send(sc).await.map_err(|_| {
-                to_napi(format!("JS source '{source_id}' is not accepting changes"))
+                coded_message(
+                    DrasiErrorCode::JsSourceClosed,
+                    format!("JS source '{source_id}' is not accepting changes"),
+                )
             })
         })
     }
@@ -566,7 +569,7 @@ impl Drasi {
         let inner = self.inner.clone();
         env.spawn_future(async move {
             let descriptor = { inner.sources.lock().unwrap().get(&kind).cloned() }
-                .ok_or_else(|| to_napi(format!("unknown source kind '{kind}'")))?;
+                .ok_or_else(|| coded_message(DrasiErrorCode::UnknownSourceKind, format!("unknown source kind '{kind}'")))?;
             let source = descriptor
                 .create_source(&id, &config, auto_start.unwrap_or(true))
                 .await
@@ -778,7 +781,7 @@ impl Drasi {
         let inner = self.inner.clone();
         env.spawn_future(async move {
             let descriptor = { inner.reactions.lock().unwrap().get(&kind).cloned() }
-                .ok_or_else(|| to_napi(format!("unknown reaction kind '{kind}'")))?;
+                .ok_or_else(|| coded_message(DrasiErrorCode::UnknownReactionKind, format!("unknown reaction kind '{kind}'")))?;
             let reaction = descriptor
                 .create_reaction(&id, query_ids, &config, true)
                 .await
@@ -1130,7 +1133,7 @@ async fn add_source_full(
     bootstrap: Option<Value>,
 ) -> napi::Result<()> {
     let descriptor = { inner.sources.lock().unwrap().get(&kind).cloned() }
-        .ok_or_else(|| to_napi(format!("unknown source kind '{kind}'")))?;
+        .ok_or_else(|| coded_message(DrasiErrorCode::UnknownSourceKind, format!("unknown source kind '{kind}'")))?;
 
     let source = descriptor
         .create_source(&id, &config, auto_start)
@@ -1141,14 +1144,14 @@ async fn add_source_full(
         let bs_kind = bs
             .get("kind")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| to_napi("bootstrap.kind is required"))?
+            .ok_or_else(|| coded_message(DrasiErrorCode::BootstrapKindRequired, "bootstrap.kind is required"))?
             .to_string();
         let bs_config = bs
             .get("config")
             .cloned()
             .unwrap_or_else(|| Value::Object(Default::default()));
         let bs_descriptor = { inner.bootstrap.lock().unwrap().get(&bs_kind).cloned() }
-            .ok_or_else(|| to_napi(format!("unknown bootstrap kind '{bs_kind}'")))?;
+            .ok_or_else(|| coded_message(DrasiErrorCode::UnknownBootstrapKind, format!("unknown bootstrap kind '{bs_kind}'")))?;
         let provider = bs_descriptor
             .create_bootstrap_provider(&bs_config, &config)
             .await
@@ -1175,7 +1178,7 @@ async fn add_reaction_full(
     config: Value,
 ) -> napi::Result<()> {
     let descriptor = { inner.reactions.lock().unwrap().get(&kind).cloned() }
-        .ok_or_else(|| to_napi(format!("unknown reaction kind '{kind}'")))?;
+        .ok_or_else(|| coded_message(DrasiErrorCode::UnknownReactionKind, format!("unknown reaction kind '{kind}'")))?;
 
     let reaction = descriptor
         .create_reaction(&id, query_ids, &config, true)

@@ -31,8 +31,10 @@ use napi_derive::napi;
 
 /// Stable, machine-readable error codes surfaced on `err.code`.
 ///
-/// Emitted into the generated `index.d.ts` as a `const enum` whose string values
-/// are the codes, giving TypeScript consumers a typed set to branch on.
+/// Built with `#[napi(string_enum)]` but emitted into the generated `index.d.ts`
+/// (via `napi build --no-const-enum`) as a **string-literal union type**, giving
+/// TypeScript consumers a typed, runtime-free set to branch on — safe under
+/// `isolatedModules` (no `const enum`).
 #[napi(string_enum)]
 #[derive(Clone, Copy)]
 pub enum DrasiErrorCode {
@@ -116,6 +118,18 @@ pub fn throw_coded(env: &Env, code: DrasiErrorCode, msg: impl Into<String>) -> n
         }
         Err(_) => napi::Error::from_reason(msg),
     }
+}
+
+/// Build a generic (`GenericFailure`) napi error whose **message** embeds the
+/// stable code token, for the few async paths where a real `err.code` cannot be
+/// attached (napi forces async rejections to a `Status` string). This keeps a
+/// single, consistent token consumers can match on even when `.code` is
+/// `'GenericFailure'`: `<human message> [CODE]`. Used only on async fallbacks
+/// (`fromConfig` component creation and the mid-send `JS_SOURCE_CLOSED` race);
+/// the synchronous paths for these same codes carry a real `.code` and an
+/// unchanged message.
+pub fn coded_message(code: DrasiErrorCode, msg: impl Into<String>) -> napi::Error {
+    napi::Error::from_reason(format!("{} [{}]", msg.into(), code.as_str()))
 }
 
 /// A machine code + human message pair for a validation failure raised where an

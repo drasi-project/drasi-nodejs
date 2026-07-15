@@ -119,18 +119,52 @@ const change: SourceChangeInput = { op: 'insert', id: 'o1', labels: ['Order'] };
 const onResult = (event: QueryResultEvent) => console.log(event.results.length);
 ```
 
-Errors thrown by validation carry a stable, machine-readable code on `err.code`
-(see the exported `DrasiErrorCode`), so callers can branch on the code instead of
-string-matching messages:
+## Error handling
+
+Argument/validation failures throw a stable, machine-readable **code** so callers
+can branch on it instead of matching human-readable messages. `DrasiErrorCode` is
+exported as a string-literal **union type** (no runtime `const enum`, so it is
+safe under `isolatedModules` / esbuild / swc / Vite):
 
 ```ts
-import { DrasiErrorCode } from '@drasi/lib';
+import type { DrasiErrorCode } from '@drasi/lib';
+
 try {
   await drasi.addSource('unknown', 's', {});
 } catch (err) {
-  if ((err as { code?: string }).code === DrasiErrorCode.UnknownSourceKind) {
+  const code = (err as { code?: string }).code as DrasiErrorCode | undefined;
+  if (code === 'UNKNOWN_SOURCE_KIND') {
     // handle the unregistered-kind case
   }
+}
+```
+
+Because napi-rs can only attach a custom `code` on a **synchronous** throw (async
+promise rejections are forced to `code === 'GenericFailure'`), the two error
+classes behave as follows — the human-readable message is the same in both cases:
+
+- **Synchronous throws (`err.code` is the stable code).** Argument validation runs
+  synchronously, before the method returns its `Promise`. This covers, on their
+  normal paths: `UNKNOWN_SOURCE_KIND`, `UNKNOWN_REACTION_KIND`,
+  `UNKNOWN_BOOTSTRAP_KIND`, `BOOTSTRAP_KIND_REQUIRED`, `MISSING_CONFIG_FIELD`,
+  `NO_JS_SOURCE`, `JS_SOURCE_CLOSED`, `CHANGE_NOT_OBJECT`, `CHANGE_OP_REQUIRED`,
+  `CHANGE_ID_REQUIRED`, `RELATION_REQUIRES_BOTH_ENDS`, `UNKNOWN_CHANGE_OP`,
+  `STATE_STORE_PATH_REQUIRED`, and `UNKNOWN_STATE_STORE_KIND`. Note this means
+  validation errors surface as a **synchronous throw** rather than a rejected
+  promise — transparent to `await`/`try` callers, but a bare
+  `p = fn(); p.catch(...)` (no `await`) will not catch them.
+- **Async fallbacks (message-only; `err.code === 'GenericFailure'`).** A few paths
+  can only fail after the async work has begun: component creation inside
+  `fromConfig` (plugin kinds resolve after the async plugin load) and the rare
+  race where a JS source closes mid-`pushChange`. There the stable code is embedded
+  in the message as a trailing `[CODE]` token (e.g.
+  `unknown source kind 'x' [UNKNOWN_SOURCE_KIND]`) so a single check still works:
+
+```ts
+function drasiCode(err: unknown): string | undefined {
+  const e = err as { code?: string; message?: string };
+  if (e.code && e.code !== 'GenericFailure') return e.code;        // sync throw
+  return e.message?.match(/\[([A-Z_]+)\]\s*$/)?.[1];               // async fallback
 }
 ```
 

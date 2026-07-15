@@ -384,6 +384,19 @@ test('validation errors expose stable typed err.code values', async () => {
   await d.close();
 });
 
+test('fromConfig async component errors embed the code token in the message', async () => {
+  // fromConfig's component creation runs inside the returned Promise (after the
+  // async plugin load), so it cannot carry a real err.code; the stable token is
+  // embedded in the message instead.
+  await assert.rejects(
+    async () => Drasi.fromConfig({ id: 'fc-err', sources: [{ kind: 'does-not-exist', id: 's' }] }),
+    (err) => {
+      assert.match(err.message, /unknown source kind 'does-not-exist' \[UNKNOWN_SOURCE_KIND\]/);
+      return true;
+    },
+  );
+});
+
 test('watchPlugins hot-loads a newly added plugin', async () => {
   const d = await Drasi.create('t-watch');
   const watched = mkdtempSync(join(tmpdir(), 'drasi-plugins-'));
