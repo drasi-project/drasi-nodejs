@@ -28,9 +28,10 @@ npm install @drasi/lib
 ```
 
 npm resolves the correct native binary from a per-platform optional dependency
-(`@drasi/lib-<platform>`) for Windows, macOS and Linux on x64/arm64. See
-[`docs/releasing.md`](./docs/releasing.md) for how the binaries are built and
-distributed.
+(`@drasi/lib-<platform>`) for Windows (x64), Linux (x64/arm64), and Apple-silicon
+macOS (arm64). Intel macOS (x64) has no prebuilt binary and must be built from
+source. See [`docs/releasing.md`](./docs/releasing.md) for how the binaries are
+built and distributed.
 
 ## Build from source
 
@@ -185,9 +186,9 @@ Still to come:
 Recently wired up (first stable publish pending, see
 [`docs/releasing.md`](./docs/releasing.md)):
 
-- Cross-platform prebuilt binaries (win/mac/linux × x64/arm64) distributed as
-  per-platform npm packages, plus a tag-triggered release pipeline that publishes
-  with build provenance.
+- Prebuilt binaries for Windows (x64), Linux (x64/arm64), and Apple-silicon macOS
+  (arm64), distributed as per-platform npm packages, plus a tag-triggered release
+  pipeline that publishes with build provenance.
 
 ## License
 

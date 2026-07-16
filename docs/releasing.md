@@ -21,8 +21,12 @@ Rust on every `npm install`, we ship **prebuilt binaries**:
   | `x86_64-pc-windows-msvc`      | `@drasi/lib-win32-x64-msvc`    |
   | `x86_64-unknown-linux-gnu`    | `@drasi/lib-linux-x64-gnu`     |
   | `aarch64-unknown-linux-gnu`   | `@drasi/lib-linux-arm64-gnu`   |
-  | `x86_64-apple-darwin`         | `@drasi/lib-darwin-x64`        |
   | `aarch64-apple-darwin`        | `@drasi/lib-darwin-arm64`      |
+
+  **Intel macOS (`x86_64-apple-darwin`) is intentionally not prebuilt** — the
+  `macos-13` Intel runners GitHub is deprecating made release scheduling
+  unreliable, and Apple silicon is the forward-looking target. Intel-mac users run
+  by building from source (see _Build from source_ in the README).
 
 - The platform packages are wired as **`optionalDependencies`** of the main
   package. npm installs only the one matching the consumer's `os`/`cpu`/`libc`,
@@ -62,12 +66,13 @@ Additional rules:
 Releases are automated by [`.github/workflows/release.yml`](../.github/workflows/release.yml):
 
 - **Trigger:** pushing a `vX.Y.Z` git tag.
-- **`build` matrix:** builds the addon for all five targets
+- **`build` matrix:** builds the addon for all four targets
   (`napi build --platform --release --target <triple>`) on matching **native
-  runners** — Windows x64, macOS x64 (`macos-13`) and arm64 (`macos-14`), Linux x64
-  (`ubuntu-22.04`) and arm64 (`ubuntu-22.04-arm`). Native runners are used instead
-  of cross-compilation because the dependency tree includes C/assembly crates (e.g.
-  `aws-lc-sys`) whose cross builds are fragile. It uploads each `.node` plus the
+  runners** — Windows x64, macOS arm64 (`macos-14`), Linux x64 (`ubuntu-22.04`) and
+  arm64 (`ubuntu-22.04-arm`). Native runners are used instead of cross-compilation
+  because the dependency tree includes C/assembly crates (e.g. `aws-lc-sys`) whose
+  cross builds are fragile. Intel macOS (`x86_64-apple-darwin`) is not built (see
+  the note above). It uploads each `.node` plus the
   loader/types as workflow artifacts. The Linux jobs are pinned to **Ubuntu 22.04
   (glibc 2.35)**, so the prebuilt Linux binaries require **glibc >= 2.35**
   (Ubuntu 22.04 / Debian 12 / RHEL 9 and newer). If an even lower glibc floor is
