@@ -121,11 +121,12 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
       # OIDC trusted publishing (tokenless) needs npm >= 11.5.1; upgrading also
-      # keeps provenance support current for the token path.
+      # keeps provenance support current for the token path. Requires a recent
+      # Node (npm >= 12 dropped Node 20), hence node-version 24 for this job.
       - name: Upgrade npm
         run: npm install -g npm@latest
 
