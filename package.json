@@ -28,7 +28,7 @@
     "build": "napi build --platform",
     "build:release": "napi build --platform --release",
     "pretest": "node scripts/build-plugins.mjs",
-    "test": "node --test \"test/*.test.mjs\"",
+    "test": "node --test",
     "lint": "cargo clippy -- -D warnings"
   },
   "devDependencies": {
