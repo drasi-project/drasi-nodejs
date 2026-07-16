@@ -43,8 +43,6 @@ jobs:
         include:
           - host: windows-latest
             target: x86_64-pc-windows-msvc
-          - host: macos-13
-            target: x86_64-apple-darwin
           - host: macos-14
             target: aarch64-apple-darwin
           - host: ubuntu-22.04
