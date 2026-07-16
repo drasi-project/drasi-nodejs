@@ -14,14 +14,30 @@ binding around Drasi's embeddable engine (`drasi-lib`) and its host SDK
 
 > Status: early. The core engine, dynamic plugin loading, JS sources/reactions,
 > streaming, lifecycle management and a secret store are implemented and tested.
-> OCI plugin fetch, persistence providers and cross-platform prebuilt binaries are
-> on the roadmap (see below).
+> OCI plugin fetch and persistence providers are on the roadmap (see below).
+> Cross-platform prebuilt binaries and the npm release pipeline are wired up (see
+> [`docs/releasing.md`](./docs/releasing.md)); the first stable publish is pending.
 
-## Install / build
+## Install
 
-This package builds a native addon. Its Rust dependencies (the Drasi engine and
-plugin host SDK) come from crates.io, so no sibling checkout is required (see
-_Dependency strategy_). Then:
+Once published, `@drasi/lib` ships **prebuilt binaries**, so consumers install with
+no Rust toolchain:
+
+```bash
+npm install @drasi/lib
+```
+
+npm resolves the correct native binary from a per-platform optional dependency
+(`@drasi/lib-<platform>`) for Windows, macOS and Linux on x64/arm64. See
+[`docs/releasing.md`](./docs/releasing.md) for how the binaries are built and
+distributed.
+
+## Build from source
+
+Building from source is only needed to develop `@drasi/lib` or to run on a platform
+without a prebuilt binary. It builds a native addon whose Rust dependencies (the
+Drasi engine and plugin host SDK) come from crates.io, so no sibling checkout is
+required (see _Dependency strategy_):
 
 ```bash
 npm install
@@ -163,9 +179,15 @@ Still to come:
   surfaced today; enforcement is opt-in/future).
 - RocksDB index provider; durable (checkpointed) JS reactions.
 - Identity providers; declarative config-schema validation.
-- Cross-platform prebuilt binaries (win/mac/linux × x64/arm64) published to npm.
 - Richer TypeScript types for configs/results (companion `types.d.ts` ships today);
   typed error codes.
+
+Recently wired up (first stable publish pending, see
+[`docs/releasing.md`](./docs/releasing.md)):
+
+- Cross-platform prebuilt binaries (win/mac/linux × x64/arm64) distributed as
+  per-platform npm packages, plus a tag-triggered release pipeline that publishes
+  with build provenance.
 
 ## License
 

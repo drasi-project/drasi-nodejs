@@ -50,6 +50,7 @@ jobs:
       - name: Test (pretest builds + stages example plugins)
         run: npm test
 
-  # Cross-platform prebuilt binaries for npm publishing are a roadmap item.
-  # `@napi-rs/cli` supports a build matrix + per-platform optional-dependency
-  # packages; wire it up here as a follow-up.
+  # Cross-platform prebuilt binaries and npm publishing live in `release.yml`,
+  # which builds all five `napi.targets` on tag pushes (`v*`) and publishes the
+  # main package plus the per-platform optional-dependency packages with
+  # provenance. This workflow stays focused on fast per-PR validation.
