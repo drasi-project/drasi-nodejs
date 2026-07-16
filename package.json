@@ -31,7 +31,7 @@
     "prepublishOnly": "napi prepublish -t npm",
     "version": "napi version",
     "pretest": "node scripts/build-plugins.mjs",
-    "test": "node --test \"test/*.test.mjs\"",
+    "test": "node --test",
     "lint": "cargo clippy -- -D warnings"
   },
   "devDependencies": {
