@@ -1331,3 +1331,52 @@ fn spawn_log_forwarder(
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_joins_accepts_well_formed_definitions() {
+        let joins = parse_joins(json!([
+            {
+                "id": "HAS_PRICE",
+                "keys": [
+                    { "label": "stocks", "property": "symbol" },
+                    { "label": "stock_prices", "property": "symbol" }
+                ]
+            }
+        ]))
+        .expect("well-formed joins should parse");
+
+        assert_eq!(joins.len(), 1);
+        assert_eq!(joins[0].id, "HAS_PRICE");
+        assert_eq!(joins[0].keys.len(), 2);
+        assert_eq!(joins[0].keys[0].label, "stocks");
+        assert_eq!(joins[0].keys[0].property, "symbol");
+    }
+
+    #[test]
+    fn parse_joins_accepts_an_empty_list() {
+        let joins = parse_joins(json!([])).expect("empty list is valid");
+        assert!(joins.is_empty());
+    }
+
+    #[test]
+    fn parse_joins_rejects_a_non_array() {
+        assert!(parse_joins(json!({ "id": "x" })).is_err());
+        assert!(parse_joins(json!("nope")).is_err());
+    }
+
+    #[test]
+    fn parse_joins_rejects_entries_missing_required_fields() {
+        // `keys` is required, so an entry without it must fail.
+        assert!(parse_joins(json!([{ "id": "HAS_PRICE" }])).is_err());
+        // A key missing `property` must fail.
+        assert!(parse_joins(json!([
+            { "id": "j", "keys": [{ "label": "a" }] }
+        ]))
+        .is_err());
+    }
+}

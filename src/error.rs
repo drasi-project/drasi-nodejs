@@ -38,7 +38,7 @@ use napi_derive::napi;
 /// napi registers in `index.js`, and lets consumers compare
 /// `err.code === DrasiErrorCode.UnknownSourceKind`.
 #[napi(string_enum)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrasiErrorCode {
     #[napi(value = "UNKNOWN_SOURCE_KIND")]
     UnknownSourceKind,
@@ -137,6 +137,7 @@ pub fn coded_message(code: DrasiErrorCode, msg: impl Into<String>) -> napi::Erro
 /// A machine code + human message pair for a validation failure raised where an
 /// [`Env`] is not directly available (e.g. in `conversions`). The caller, which
 /// does have an `Env`, turns it into a thrown JS error via [`throw_coded`].
+#[derive(Debug, PartialEq, Eq)]
 pub struct CodedReason {
     pub code: DrasiErrorCode,
     pub message: String,
@@ -155,4 +156,63 @@ impl CodedReason {
 /// error with the default `GenericFailure` code.
 pub fn to_napi<E: std::fmt::Display>(e: E) -> napi::Error {
     napi::Error::from_reason(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every variant round-trips to its documented stable string, and `as_ref`
+    /// agrees with `as_str`. If a variant is added without a matching arm this
+    /// list makes the omission obvious.
+    #[test]
+    fn error_codes_have_stable_strings() {
+        let cases = [
+            (DrasiErrorCode::UnknownSourceKind, "UNKNOWN_SOURCE_KIND"),
+            (DrasiErrorCode::UnknownReactionKind, "UNKNOWN_REACTION_KIND"),
+            (DrasiErrorCode::UnknownBootstrapKind, "UNKNOWN_BOOTSTRAP_KIND"),
+            (DrasiErrorCode::BootstrapKindRequired, "BOOTSTRAP_KIND_REQUIRED"),
+            (DrasiErrorCode::MissingConfigField, "MISSING_CONFIG_FIELD"),
+            (DrasiErrorCode::NoJsSource, "NO_JS_SOURCE"),
+            (DrasiErrorCode::JsSourceClosed, "JS_SOURCE_CLOSED"),
+            (DrasiErrorCode::ChangeNotObject, "CHANGE_NOT_OBJECT"),
+            (DrasiErrorCode::ChangeOpRequired, "CHANGE_OP_REQUIRED"),
+            (DrasiErrorCode::ChangeIdRequired, "CHANGE_ID_REQUIRED"),
+            (DrasiErrorCode::RelationRequiresBothEnds, "RELATION_REQUIRES_BOTH_ENDS"),
+            (DrasiErrorCode::UnknownChangeOp, "UNKNOWN_CHANGE_OP"),
+            (DrasiErrorCode::StateStorePathRequired, "STATE_STORE_PATH_REQUIRED"),
+            (DrasiErrorCode::UnknownStateStoreKind, "UNKNOWN_STATE_STORE_KIND"),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(code.as_str(), expected);
+            assert_eq!(code.as_ref(), expected);
+        }
+    }
+
+    #[test]
+    fn coded_message_embeds_the_stable_token_after_the_message() {
+        let err = coded_message(DrasiErrorCode::JsSourceClosed, "source is gone");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("source is gone"),
+            "keeps the human message: {rendered}"
+        );
+        assert!(
+            rendered.contains("[JS_SOURCE_CLOSED]"),
+            "embeds the [CODE] token: {rendered}"
+        );
+    }
+
+    #[test]
+    fn coded_reason_carries_code_and_message() {
+        let reason = CodedReason::new(DrasiErrorCode::ChangeIdRequired, "change.id is required");
+        assert_eq!(reason.code, DrasiErrorCode::ChangeIdRequired);
+        assert_eq!(reason.message, "change.id is required");
+    }
+
+    #[test]
+    fn to_napi_preserves_the_display_message() {
+        let err = to_napi("boom");
+        assert!(err.to_string().contains("boom"));
+    }
 }
