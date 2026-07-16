@@ -109,16 +109,64 @@ auto-start individually. (Adding everything and then calling `start()` also work
 
 ## Types
 
-Companion helper types are available in `types.d.ts` for config and callback
-shapes that the generated `index.d.ts` currently exposes as `any`.
+The generated `index.d.ts` is self-contained: every config/result parameter and
+return, plus the callback payloads, is exposed with a concrete TypeScript type
+(no bare `any`). Import them directly from the package.
 
 ```ts
-import type { SourceChangeInput, QueryResultEvent } from '@drasi/lib/types.d.ts';
+import type { SourceChangeInput, QueryResultEvent } from '@drasi/lib';
 const change: SourceChangeInput = { op: 'insert', id: 'o1', labels: ['Order'] };
 const onResult = (event: QueryResultEvent) => console.log(event.results.length);
 ```
 
-They can also be referenced with a `/// <reference path="..." />` directive.
+## Error handling
+
+Argument/validation failures throw a stable, machine-readable **code** so callers
+can branch on it instead of matching human-readable messages. `DrasiErrorCode` is
+exported as a regular (non-`const`) `enum` with string values — it is safe under
+`isolatedModules` / esbuild / swc / Vite and has a real runtime value, so both the
+type and value are usable:
+
+```ts
+import { DrasiErrorCode } from '@drasi/lib';
+
+try {
+  await drasi.addSource('unknown', 's', {});
+} catch (err) {
+  if ((err as { code?: string }).code === DrasiErrorCode.UnknownSourceKind) {
+    // handle the unregistered-kind case
+  }
+}
+```
+
+Because napi-rs can only attach a custom `code` on a **synchronous** throw (async
+promise rejections are forced to `code === 'GenericFailure'`), the two error
+classes behave as follows — the human-readable message is the same in both cases:
+
+- **Synchronous throws (`err.code` is the stable code).** Argument validation runs
+  synchronously, before the method returns its `Promise`. This covers, on their
+  normal paths: `UNKNOWN_SOURCE_KIND`, `UNKNOWN_REACTION_KIND`,
+  `UNKNOWN_BOOTSTRAP_KIND`, `BOOTSTRAP_KIND_REQUIRED`, `MISSING_CONFIG_FIELD`,
+  `NO_JS_SOURCE`, `JS_SOURCE_CLOSED`, `CHANGE_NOT_OBJECT`, `CHANGE_OP_REQUIRED`,
+  `CHANGE_ID_REQUIRED`, `RELATION_REQUIRES_BOTH_ENDS`, `UNKNOWN_CHANGE_OP`,
+  `STATE_STORE_PATH_REQUIRED`, and `UNKNOWN_STATE_STORE_KIND`. Note this means
+  validation errors surface as a **synchronous throw** rather than a rejected
+  promise — transparent to `await`/`try` callers, but a bare
+  `p = fn(); p.catch(...)` (no `await`) will not catch them.
+- **Async fallbacks (message-only; `err.code === 'GenericFailure'`).** A few paths
+  can only fail after the async work has begun: component creation inside
+  `fromConfig` (plugin kinds resolve after the async plugin load) and the rare
+  race where a JS source closes mid-`pushChange`. There the stable code is embedded
+  in the message as a trailing `[CODE]` token (e.g.
+  `unknown source kind 'x' [UNKNOWN_SOURCE_KIND]`) so a single check still works:
+
+```ts
+function drasiCode(err: unknown): string | undefined {
+  const e = err as { code?: string; message?: string };
+  if (e.code && e.code !== 'GenericFailure') return e.code;        // sync throw
+  return e.message?.match(/\[([A-Z_]+)\]\s*$/)?.[1];               // async fallback
+}
+```
 
 ## How it works
 
@@ -160,8 +208,6 @@ Still to come:
 - RocksDB index provider; durable (checkpointed) JS reactions.
 - Identity providers; declarative config-schema validation.
 - Cross-platform prebuilt binaries (win/mac/linux × x64/arm64) published to npm.
-- Richer TypeScript types for configs/results (companion `types.d.ts` ships today);
-  typed error codes.
 
 ## License
 

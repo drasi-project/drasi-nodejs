@@ -12,7 +12,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use napi_derive::napi;use serde_json::Value;
+use napi::bindgen_prelude::PromiseRaw;
+use napi::Env;
+use napi_derive::napi;
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use drasi_core::models::SourceChange;
@@ -28,7 +31,7 @@ use drasi_plugin_sdk::{
 
 use crate::components::{JsReaction, JsResultFn, JsSource};
 use crate::conversions::json_to_source_change;
-use crate::error::{reason, to_napi};
+use crate::error::{coded_message, throw_coded, to_napi, DrasiErrorCode};
 use crate::secrets::{build_config_resolver_context, config_resolver_callback, ConfigResolverContext};
 
 /// File patterns for discovering cdylib plugins (Unix + Windows naming).
@@ -153,8 +156,15 @@ impl Drasi {
     ///
     /// `options` may include `{ secrets: { NAME: "value", ... } }` to seed an
     /// in-memory secret store used to resolve `ConfigValue::Secret` references.
-    #[napi(factory)]
-    pub async fn create(id: String, options: Option<Value>) -> napi::Result<Drasi> {
+    ///
+    /// Option validation (`stateStore`) is performed synchronously and throws a
+    /// typed error (`err.code`); the engine build itself resolves asynchronously.
+    #[napi(ts_args_type = "id: string, options?: CreateOptions")]
+    pub fn create<'a>(
+        env: &'a Env,
+        id: String,
+        options: Option<Value>,
+    ) -> napi::Result<PromiseRaw<'a, Drasi>> {
         // Build an in-memory secret store, seeded from options.secrets.
         let mut store = MemorySecretStoreProvider::new();
         if let Some(opts) = options.as_ref() {
@@ -168,47 +178,11 @@ impl Drasi {
         }
         let provider: Arc<dyn SecretStoreProvider> = Arc::new(store);
 
-        let mut builder = DrasiLib::builder()
-            .with_id(id.clone())
-            .with_secret_store_provider(provider.clone());
+        // Validate the optional persistent state store synchronously so callers
+        // get a typed `err.code`, e.g. { stateStore: { kind: 'redb', path: '...' } }.
+        let state_path = parse_state_store(env, options.as_ref())?;
 
-        // Optional persistent state store, e.g. { stateStore: { kind: 'redb', path: '...' } }.
-        if let Some(ss) = options.as_ref().and_then(|o| o.get("stateStore")) {
-            let kind = ss.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-            match kind {
-                "redb" => {
-                    let path = ss
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| reason("stateStore.path is required for redb"))?;
-                    let p = drasi_state_store_redb::RedbStateStoreProvider::new(path)
-                        .map_err(to_napi)?;
-                    builder = builder.with_state_store_provider(Arc::new(p));
-                }
-                other => return Err(reason(format!("unknown stateStore kind '{other}'"))),
-            }
-        }
-
-        let core = builder.build().await.map_err(to_napi)?;
-
-        // The config-resolver and callback contexts are built lazily on first
-        // plugin load (see `Inner::ensure_plugin_contexts`), so instances that
-        // never load cdylib plugins spawn no resolver thread and leak nothing.
-        Ok(Drasi {
-            inner: Arc::new(Inner {
-                drasi: Arc::new(core),
-                sources: Mutex::new(HashMap::new()),
-                reactions: Mutex::new(HashMap::new()),
-                bootstrap: Mutex::new(HashMap::new()),
-                js_source_senders: Mutex::new(HashMap::new()),
-                watchers: Mutex::new(Vec::new()),
-                plugin_files: Mutex::new(HashMap::new()),
-                secret_provider: provider,
-                instance_id: id,
-                resolver_ctx: OnceLock::new(),
-                callback_ctx: OnceLock::new(),
-            }),
-        })
+        env.spawn_future(async move { build_engine(id, provider, state_path).await })
     }
 
     /// Build and start an engine from a declarative config object:
@@ -219,43 +193,49 @@ impl Drasi {
     ///   "reactions": [{ "kind": "log", "id": "r", "queries": ["q"], "config": {…} }] }
     /// ```
     /// The returned engine is already started; components auto-start as they are added.
-    #[napi(factory)]
-    pub async fn from_config(config: Value) -> napi::Result<Drasi> {
+    ///
+    /// Required-field and `stateStore` validation is performed synchronously and
+    /// throws a typed error (`err.code`); the engine build, plugin load, start,
+    /// and component creation resolve asynchronously.
+    #[napi(ts_args_type = "config: DrasiConfig", ts_return_type = "Promise<Drasi>")]
+    pub fn from_config<'a>(env: &'a Env, config: Value) -> napi::Result<PromiseRaw<'a, Drasi>> {
         let id = config
             .get("id")
             .and_then(|v| v.as_str())
             .unwrap_or("drasi")
             .to_string();
 
-        let mut opts = serde_json::Map::new();
-        if let Some(s) = config.get("secrets") {
-            opts.insert("secrets".to_string(), s.clone());
+        // Seed the secret store and validate the state store synchronously.
+        let mut store = MemorySecretStoreProvider::new();
+        if let Some(secrets) = config.get("secrets").and_then(|v| v.as_object()) {
+            for (name, value) in secrets {
+                if let Some(s) = value.as_str() {
+                    store = store.with_secret(name, s);
+                }
+            }
         }
-        if let Some(s) = config.get("stateStore") {
-            opts.insert("stateStore".to_string(), s.clone());
-        }
+        let provider: Arc<dyn SecretStoreProvider> = Arc::new(store);
+        let state_path = parse_state_store(env, Some(&config))?;
 
-        let drasi = Drasi::create(id, Some(Value::Object(opts))).await?;
-
-        if let Some(dir) = config.get("pluginsDir").and_then(|v| v.as_str()) {
-            drasi.load_plugins(dir.to_string(), None).await?;
-        }
-
-        drasi.start().await?;
-
-        let empty: Vec<Value> = Vec::new();
+        // Validate required fields synchronously so callers get a typed `err.code`.
         let arr = |key: &str| -> Vec<Value> {
             config
                 .get(key)
                 .and_then(|v| v.as_array())
                 .cloned()
-                .unwrap_or_else(|| empty.clone())
+                .unwrap_or_default()
         };
         let req_str = |v: &Value, key: &str| -> napi::Result<String> {
             v.get(key)
                 .and_then(|x| x.as_str())
                 .map(|s| s.to_string())
-                .ok_or_else(|| reason(format!("config entry is missing '{key}'")))
+                .ok_or_else(|| {
+                    throw_coded(
+                        env,
+                        DrasiErrorCode::MissingConfigField,
+                        format!("config entry is missing '{key}'"),
+                    )
+                })
         };
         let str_vec = |v: &Value, key: &str| -> Vec<String> {
             v.get(key)
@@ -264,31 +244,59 @@ impl Drasi {
                 .unwrap_or_default()
         };
 
+        type SourceSpec = (String, String, Value, Option<bool>, Option<Value>);
+        type QuerySpec = (String, String, Vec<String>, Option<String>, Option<Value>);
+        type ReactionSpec = (String, String, Vec<String>, Value);
+
+        let mut sources: Vec<SourceSpec> = Vec::new();
         for s in arr("sources") {
             let kind = req_str(&s, "kind")?;
             let sid = req_str(&s, "id")?;
             let cfg = s.get("config").cloned().unwrap_or_else(|| Value::Object(Default::default()));
             let auto = s.get("autoStart").and_then(|v| v.as_bool());
             let bootstrap = s.get("bootstrap").cloned();
-            drasi.add_source(kind, sid, cfg, auto, bootstrap).await?;
+            sources.push((kind, sid, cfg, auto, bootstrap));
         }
+        let mut queries: Vec<QuerySpec> = Vec::new();
         for q in arr("queries") {
             let qid = req_str(&q, "id")?;
             let text = req_str(&q, "query")?;
-            let sources = str_vec(&q, "sources");
+            let srcs = str_vec(&q, "sources");
             let language = q.get("language").and_then(|v| v.as_str()).map(String::from);
             let joins = q.get("joins").cloned();
-            drasi.add_query(qid, text, sources, language, joins).await?;
+            queries.push((qid, text, srcs, language, joins));
         }
+        let mut reactions: Vec<ReactionSpec> = Vec::new();
         for r in arr("reactions") {
             let kind = req_str(&r, "kind")?;
             let rid = req_str(&r, "id")?;
-            let queries = str_vec(&r, "queries");
+            let qs = str_vec(&r, "queries");
             let cfg = r.get("config").cloned().unwrap_or_else(|| Value::Object(Default::default()));
-            drasi.add_reaction(kind, rid, queries, cfg).await?;
+            reactions.push((kind, rid, qs, cfg));
         }
+        let plugins_dir = config.get("pluginsDir").and_then(|v| v.as_str()).map(String::from);
 
-        Ok(drasi)
+        env.spawn_future(async move {
+            let drasi = build_engine(id, provider, state_path).await?;
+
+            if let Some(dir) = plugins_dir {
+                drasi.load_plugins(dir, None).await?;
+            }
+            drasi.start().await?;
+
+            for (kind, sid, cfg, auto, bootstrap) in sources {
+                add_source_full(drasi.inner.clone(), kind, sid, cfg, auto.unwrap_or(true), bootstrap)
+                    .await?;
+            }
+            for (qid, text, srcs, language, joins) in queries {
+                drasi.add_query(qid, text, srcs, language, joins).await?;
+            }
+            for (kind, rid, qs, cfg) in reactions {
+                add_reaction_full(drasi.inner.clone(), kind, rid, qs, cfg).await?;
+            }
+
+            Ok(drasi)
+        })
     }
 
     // ------------------------------------------------------------------
@@ -300,7 +308,10 @@ impl Drasi {
     ///
     /// When `verify` is provided as `{ filename: sha256hex }`, only plugin files
     /// whose contents hash to the expected value are loaded (an integrity allowlist).
-    #[napi]
+    #[napi(
+        ts_args_type = "dir: string, verify?: Record<string, string>",
+        ts_return_type = "Promise<LoadPluginsResult>"
+    )]
     pub async fn load_plugins(&self, dir: String, verify: Option<Value>) -> napi::Result<Value> {
         let verify_map: Option<HashMap<String, String>> = verify.as_ref().and_then(|v| {
             v.as_object().map(|o| {
@@ -368,7 +379,7 @@ impl Drasi {
 
     /// List available tags for a plugin repository in the configured OCI registry
     /// (default `ghcr.io/drasi-project`), e.g. `listPluginTags("source/postgres")`.
-    #[napi]
+    #[napi(ts_return_type = "Promise<string[]>")]
     pub async fn list_plugin_tags(&self, repository: String) -> napi::Result<Value> {
         use drasi_host_sdk::registry::{OciRegistryClient, RegistryConfig};
         let client = OciRegistryClient::new(RegistryConfig::default());
@@ -382,7 +393,7 @@ impl Drasi {
     /// `"ghcr.io/drasi-project/source/postgres:0.1.13-windows-msvc-amd64"`.
     /// Returns `{ path, verification }`. After pulling, call `loadPlugins(destDir)`
     /// (or `watchPlugins`) to register it.
-    #[napi]
+    #[napi(ts_return_type = "Promise<PullPluginResult>")]
     pub async fn pull_plugin(
         &self,
         reference: String,
@@ -402,8 +413,9 @@ impl Drasi {
     }
 
     /// Return the registered plugin kinds: `{ sources, reactions, bootstrap }`.
-    #[napi]
-    pub fn plugin_kinds(&self) -> Value {        let sources: Vec<String> = self.inner.sources.lock().unwrap().keys().cloned().collect();
+    #[napi(ts_return_type = "PluginKinds")]
+    pub fn plugin_kinds(&self) -> Value {
+        let sources: Vec<String> = self.inner.sources.lock().unwrap().keys().cloned().collect();
         let reactions: Vec<String> =
             self.inner.reactions.lock().unwrap().keys().cloned().collect();
         let bootstrap: Vec<String> =
@@ -423,52 +435,33 @@ impl Drasi {
     ///
     /// `bootstrap`, when provided as `{ kind, config }`, attaches a bootstrap
     /// provider so subscribing queries receive an initial snapshot.
-    #[napi]
-    pub async fn add_source(
+    ///
+    /// The `kind` and `bootstrap.kind` are validated synchronously (typed
+    /// `err.code`); creating and registering the source resolves asynchronously.
+    #[napi(
+        ts_args_type = "kind: string, id: string, config: Record<string, unknown>, autoStart?: boolean, bootstrap?: BootstrapConfig",
+        ts_return_type = "Promise<void>"
+    )]
+    pub fn add_source<'a>(
         &self,
+        env: &'a Env,
         kind: String,
         id: String,
         config: Value,
         auto_start: Option<bool>,
         bootstrap: Option<Value>,
-    ) -> napi::Result<()> {
-        let descriptor = {
-            let map = self.inner.sources.lock().unwrap();
-            map.get(&kind).cloned()
-        }
-        .ok_or_else(|| reason(format!("unknown source kind '{kind}'")))?;
-
-        let source = descriptor
-            .create_source(&id, &config, auto_start.unwrap_or(true))
-            .await
-            .map_err(to_napi)?;
-
-        if let Some(bs) = bootstrap {
-            let bs_kind = bs
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| reason("bootstrap.kind is required"))?
-                .to_string();
-            let bs_config = bs.get("config").cloned().unwrap_or_else(|| Value::Object(Default::default()));
-            let bs_descriptor = {
-                let map = self.inner.bootstrap.lock().unwrap();
-                map.get(&bs_kind).cloned()
-            }
-            .ok_or_else(|| reason(format!("unknown bootstrap kind '{bs_kind}'")))?;
-            let provider = bs_descriptor
-                .create_bootstrap_provider(&bs_config, &config)
-                .await
-                .map_err(to_napi)?;
-            source.set_bootstrap_provider(provider).await;
-        }
-
-        let mut meta = HashMap::new();
-        meta.insert("kind".to_string(), kind);
-        self.inner
-            .drasi
-            .add_source_with_metadata(source, meta)
-            .await
-            .map_err(to_napi)
+    ) -> napi::Result<PromiseRaw<'a, ()>> {
+        validate_source_kind(env, &self.inner, &kind)?;
+        validate_bootstrap(env, &self.inner, bootstrap.as_ref())?;
+        let inner = self.inner.clone();
+        env.spawn_future(add_source_full(
+            inner,
+            kind,
+            id,
+            config,
+            auto_start.unwrap_or(true),
+            bootstrap,
+        ))
     }
 
     /// Add a programmatic source that JavaScript pushes changes into via
@@ -497,18 +490,51 @@ impl Drasi {
     /// `change` shape: `{ op, id, labels?, properties? }` for nodes, or include
     /// `startId`/`endId` for a relation. Awaits if the source's buffer is full
     /// (backpressure).
-    #[napi]
-    pub async fn push_change(&self, source_id: String, change: Value) -> napi::Result<()> {
+    ///
+    /// The source id and change shape are validated synchronously (typed
+    /// `err.code`); enqueueing the change resolves asynchronously.
+    #[napi(
+        ts_args_type = "sourceId: string, change: SourceChangeInput",
+        ts_return_type = "Promise<void>"
+    )]
+    pub fn push_change<'a>(
+        &self,
+        env: &'a Env,
+        source_id: String,
+        change: Value,
+    ) -> napi::Result<PromiseRaw<'a, ()>> {
         let tx = {
             let map = self.inner.js_source_senders.lock().unwrap();
             map.get(&source_id).cloned()
         }
-        .ok_or_else(|| reason(format!("no JS source '{source_id}'")))?;
+        .ok_or_else(|| {
+            throw_coded(
+                env,
+                DrasiErrorCode::NoJsSource,
+                format!("no JS source '{source_id}'"),
+            )
+        })?;
 
-        let sc = json_to_source_change(&source_id, &change).map_err(to_napi)?;
-        tx.send(sc)
-            .await
-            .map_err(|_| reason(format!("JS source '{source_id}' is not accepting changes")))
+        // If the source's receiver is already gone, fail fast with a typed code.
+        if tx.is_closed() {
+            return Err(throw_coded(
+                env,
+                DrasiErrorCode::JsSourceClosed,
+                format!("JS source '{source_id}' is not accepting changes"),
+            ));
+        }
+
+        let sc = json_to_source_change(&source_id, &change)
+            .map_err(|r| throw_coded(env, r.code, r.message))?;
+
+        env.spawn_future(async move {
+            tx.send(sc).await.map_err(|_| {
+                coded_message(
+                    DrasiErrorCode::JsSourceClosed,
+                    format!("JS source '{source_id}' is not accepting changes"),
+                )
+            })
+        })
     }
 
     /// Remove a source. When `cleanup` is true, external state is also torn down.
@@ -527,28 +553,29 @@ impl Drasi {
     }
 
     /// Replace a source's configuration in place (same id).
-    #[napi]
-    pub async fn update_source(
+    #[napi(
+        ts_args_type = "kind: string, id: string, config: Record<string, unknown>, autoStart?: boolean",
+        ts_return_type = "Promise<void>"
+    )]
+    pub fn update_source<'a>(
         &self,
+        env: &'a Env,
         kind: String,
         id: String,
         config: Value,
         auto_start: Option<bool>,
-    ) -> napi::Result<()> {
-        let descriptor = {
-            let map = self.inner.sources.lock().unwrap();
-            map.get(&kind).cloned()
-        }
-        .ok_or_else(|| reason(format!("unknown source kind '{kind}'")))?;
-        let source = descriptor
-            .create_source(&id, &config, auto_start.unwrap_or(true))
-            .await
-            .map_err(to_napi)?;
-        self.inner
-            .drasi
-            .update_source(&id, source)
-            .await
-            .map_err(to_napi)
+    ) -> napi::Result<PromiseRaw<'a, ()>> {
+        validate_source_kind(env, &self.inner, &kind)?;
+        let inner = self.inner.clone();
+        env.spawn_future(async move {
+            let descriptor = { inner.sources.lock().unwrap().get(&kind).cloned() }
+                .ok_or_else(|| coded_message(DrasiErrorCode::UnknownSourceKind, format!("unknown source kind '{kind}'")))?;
+            let source = descriptor
+                .create_source(&id, &config, auto_start.unwrap_or(true))
+                .await
+                .map_err(to_napi)?;
+            inner.drasi.update_source(&id, source).await.map_err(to_napi)
+        })
     }
 
     /// Start a source by id.
@@ -564,7 +591,7 @@ impl Drasi {
     }
 
     /// List sources as `[{ id, status }]`.
-    #[napi]
+    #[napi(ts_return_type = "Promise<ComponentStatusEntry[]>")]
     pub async fn list_sources(&self) -> napi::Result<Value> {
         let items = self.inner.drasi.list_sources().await.map_err(to_napi)?;
         Ok(statuses_to_json(items))
@@ -579,7 +606,9 @@ impl Drasi {
     /// `language` is `"cypher"` (default) or `"gql"`. `joins` is an optional array of
     /// synthetic join definitions (`[{ id, keys: [{ label, property }] }]`) used to
     /// relate elements across sources that have no explicit relationship.
-    #[napi]
+    #[napi(
+        ts_args_type = "id: string, query: string, sources: Array<string>, language?: 'cypher' | 'gql', joins?: QueryJoin[]"
+    )]
     pub async fn add_query(
         &self,
         id: String,
@@ -615,7 +644,9 @@ impl Drasi {
     /// Replace a query's definition in place (same id).
     ///
     /// `joins` matches `addQuery`: an optional array of synthetic join definitions.
-    #[napi]
+    #[napi(
+        ts_args_type = "id: string, query: string, sources: Array<string>, language?: 'cypher' | 'gql', joins?: QueryJoin[]"
+    )]
     pub async fn update_query(
         &self,
         id: String,
@@ -655,7 +686,7 @@ impl Drasi {
     }
 
     /// Get the current result set for a query as an array of objects.
-    #[napi]
+    #[napi(ts_return_type = "Promise<Array<Record<string, unknown>>>")]
     pub async fn get_query_results(&self, id: String) -> napi::Result<Value> {
         let rows = self
             .inner
@@ -667,7 +698,7 @@ impl Drasi {
     }
 
     /// List queries as `[{ id, status }]`.
-    #[napi]
+    #[napi(ts_return_type = "Promise<ComponentStatusEntry[]>")]
     pub async fn list_queries(&self) -> napi::Result<Value> {
         let items = self.inner.drasi.list_queries().await.map_err(to_napi)?;
         Ok(statuses_to_json(items))
@@ -679,32 +710,24 @@ impl Drasi {
 
     /// Add a reaction instance of the given plugin `kind`, subscribing to
     /// `query_ids`, with a JSON config.
-    #[napi]
-    pub async fn add_reaction(
+    ///
+    /// The `kind` is validated synchronously (typed `err.code`); creating and
+    /// registering the reaction resolves asynchronously.
+    #[napi(
+        ts_args_type = "kind: string, id: string, queryIds: Array<string>, config: Record<string, unknown>",
+        ts_return_type = "Promise<void>"
+    )]
+    pub fn add_reaction<'a>(
         &self,
+        env: &'a Env,
         kind: String,
         id: String,
         query_ids: Vec<String>,
         config: Value,
-    ) -> napi::Result<()> {
-        let descriptor = {
-            let map = self.inner.reactions.lock().unwrap();
-            map.get(&kind).cloned()
-        }
-        .ok_or_else(|| reason(format!("unknown reaction kind '{kind}'")))?;
-
-        let reaction = descriptor
-            .create_reaction(&id, query_ids, &config, true)
-            .await
-            .map_err(to_napi)?;
-
-        let mut meta = HashMap::new();
-        meta.insert("kind".to_string(), kind);
-        self.inner
-            .drasi
-            .add_reaction_with_metadata(reaction, meta)
-            .await
-            .map_err(to_napi)
+    ) -> napi::Result<PromiseRaw<'a, ()>> {
+        validate_reaction_kind(env, &self.inner, &kind)?;
+        let inner = self.inner.clone();
+        env.spawn_future(add_reaction_full(inner, kind, id, query_ids, config))
     }
 
     /// Add a JavaScript-defined reaction. `callback` is a value-only function
@@ -712,7 +735,9 @@ impl Drasi {
     /// `result` is the structured query result
     /// `{ query_id, sequence, timestamp, results, metadata }`. The callback is
     /// registered unref'd, so it does not keep the Node.js event loop alive.
-    #[napi(ts_args_type = "id: string, queryIds: Array<string>, callback: (result: any) => void")]
+    #[napi(
+        ts_args_type = "id: string, queryIds: Array<string>, callback: (result: QueryResultEvent) => void"
+    )]
     pub async fn add_js_reaction(
         &self,
         id: String,
@@ -740,28 +765,29 @@ impl Drasi {
     }
 
     /// Replace a reaction's configuration in place (same id).
-    #[napi]
-    pub async fn update_reaction(
+    #[napi(
+        ts_args_type = "kind: string, id: string, queryIds: Array<string>, config: Record<string, unknown>",
+        ts_return_type = "Promise<void>"
+    )]
+    pub fn update_reaction<'a>(
         &self,
+        env: &'a Env,
         kind: String,
         id: String,
         query_ids: Vec<String>,
         config: Value,
-    ) -> napi::Result<()> {
-        let descriptor = {
-            let map = self.inner.reactions.lock().unwrap();
-            map.get(&kind).cloned()
-        }
-        .ok_or_else(|| reason(format!("unknown reaction kind '{kind}'")))?;
-        let reaction = descriptor
-            .create_reaction(&id, query_ids, &config, true)
-            .await
-            .map_err(to_napi)?;
-        self.inner
-            .drasi
-            .update_reaction(&id, reaction)
-            .await
-            .map_err(to_napi)
+    ) -> napi::Result<PromiseRaw<'a, ()>> {
+        validate_reaction_kind(env, &self.inner, &kind)?;
+        let inner = self.inner.clone();
+        env.spawn_future(async move {
+            let descriptor = { inner.reactions.lock().unwrap().get(&kind).cloned() }
+                .ok_or_else(|| coded_message(DrasiErrorCode::UnknownReactionKind, format!("unknown reaction kind '{kind}'")))?;
+            let reaction = descriptor
+                .create_reaction(&id, query_ids, &config, true)
+                .await
+                .map_err(to_napi)?;
+            inner.drasi.update_reaction(&id, reaction).await.map_err(to_napi)
+        })
     }
 
     /// Start a reaction by id.
@@ -777,14 +803,14 @@ impl Drasi {
     }
 
     /// List reactions as `[{ id, status }]`.
-    #[napi]
+    #[napi(ts_return_type = "Promise<ComponentStatusEntry[]>")]
     pub async fn list_reactions(&self) -> napi::Result<Value> {
         let items = self.inner.drasi.list_reactions().await.map_err(to_napi)?;
         Ok(statuses_to_json(items))
     }
 
     /// Get output metrics for a query.
-    #[napi]
+    #[napi(ts_return_type = "Promise<QueryMetrics>")]
     pub async fn get_query_metrics(&self, id: String) -> napi::Result<Value> {
         let m = self
             .inner
@@ -805,7 +831,7 @@ impl Drasi {
     }
 
     /// Get per-query metrics for a reaction (`{ queryId: metrics }`).
-    #[napi]
+    #[napi(ts_return_type = "Promise<Record<string, ReactionQueryMetrics>>")]
     pub async fn get_reaction_metrics(&self, id: String) -> napi::Result<Value> {
         let map = self
             .inner
@@ -836,7 +862,7 @@ impl Drasi {
     }
 
     /// Get global lifecycle metrics for this instance.
-    #[napi]
+    #[napi(ts_return_type = "Promise<LifecycleMetrics>")]
     pub async fn get_lifecycle_metrics(&self) -> napi::Result<Value> {
         let m = self
             .inner
@@ -859,7 +885,7 @@ impl Drasi {
     // ------------------------------------------------------------------
 
     /// Stream **all** component lifecycle events to a JS callback `(event) => …`.
-    #[napi(ts_args_type = "callback: (event: any) => void")]
+    #[napi(ts_args_type = "callback: (event: Record<string, unknown>) => void")]
     pub async fn on_all_events(&self, callback: JsResultFn) -> napi::Result<()> {
         let stream = self.inner.drasi.get_all_events().await.map_err(to_napi)?;
         spawn_event_forwarder(stream, callback);
@@ -867,7 +893,7 @@ impl Drasi {
     }
 
     /// Stream lifecycle/status events for a specific query to a JS callback.
-    #[napi(ts_args_type = "id: string, callback: (event: any) => void")]
+    #[napi(ts_args_type = "id: string, callback: (event: Record<string, unknown>) => void")]
     pub async fn on_query_events(&self, id: String, callback: JsResultFn) -> napi::Result<()> {
         let stream = self.inner.drasi.get_query_events(&id).await.map_err(to_napi)?;
         spawn_event_forwarder(stream, callback);
@@ -875,7 +901,7 @@ impl Drasi {
     }
 
     /// Stream lifecycle/status events for a specific source to a JS callback.
-    #[napi(ts_args_type = "id: string, callback: (event: any) => void")]
+    #[napi(ts_args_type = "id: string, callback: (event: Record<string, unknown>) => void")]
     pub async fn on_source_events(&self, id: String, callback: JsResultFn) -> napi::Result<()> {
         let stream = self.inner.drasi.get_source_events(&id).await.map_err(to_napi)?;
         spawn_event_forwarder(stream, callback);
@@ -883,7 +909,7 @@ impl Drasi {
     }
 
     /// Stream lifecycle/status events for a specific reaction to a JS callback.
-    #[napi(ts_args_type = "id: string, callback: (event: any) => void")]
+    #[napi(ts_args_type = "id: string, callback: (event: Record<string, unknown>) => void")]
     pub async fn on_reaction_events(&self, id: String, callback: JsResultFn) -> napi::Result<()> {
         let stream = self
             .inner
@@ -896,7 +922,7 @@ impl Drasi {
     }
 
     /// Stream log messages for a specific source (including its plugin's logs).
-    #[napi(ts_args_type = "id: string, callback: (log: any) => void")]
+    #[napi(ts_args_type = "id: string, callback: (log: LogMessage) => void")]
     pub async fn on_source_logs(&self, id: String, callback: JsResultFn) -> napi::Result<()> {
         let (history, rx) = self
             .inner
@@ -909,7 +935,7 @@ impl Drasi {
     }
 
     /// Stream log messages for a specific query.
-    #[napi(ts_args_type = "id: string, callback: (log: any) => void")]
+    #[napi(ts_args_type = "id: string, callback: (log: LogMessage) => void")]
     pub async fn on_query_logs(&self, id: String, callback: JsResultFn) -> napi::Result<()> {
         let (history, rx) = self
             .inner
@@ -922,7 +948,7 @@ impl Drasi {
     }
 
     /// Stream log messages for a specific reaction.
-    #[napi(ts_args_type = "id: string, callback: (log: any) => void")]
+    #[napi(ts_args_type = "id: string, callback: (log: LogMessage) => void")]
     pub async fn on_reaction_logs(&self, id: String, callback: JsResultFn) -> napi::Result<()> {
         let (history, rx) = self
             .inner
@@ -973,6 +999,199 @@ fn statuses_to_json(items: Vec<(String, drasi_lib::ComponentStatus)>) -> Value {
             .map(|(id, status)| serde_json::json!({ "id": id, "status": format!("{status:?}") }))
             .collect(),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Synchronous validation helpers (raise typed `err.code` before async work)
+// ---------------------------------------------------------------------------
+
+/// Validate the optional `stateStore` option synchronously, returning the redb
+/// path if configured. Raises a typed error for an unknown kind or missing path.
+fn parse_state_store(env: &Env, options: Option<&Value>) -> napi::Result<Option<String>> {
+    let Some(ss) = options.and_then(|o| o.get("stateStore")) else {
+        return Ok(None);
+    };
+    let kind = ss.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    match kind {
+        "redb" => {
+            let path = ss.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                throw_coded(
+                    env,
+                    DrasiErrorCode::StateStorePathRequired,
+                    "stateStore.path is required for redb",
+                )
+            })?;
+            Ok(Some(path.to_string()))
+        }
+        other => Err(throw_coded(
+            env,
+            DrasiErrorCode::UnknownStateStoreKind,
+            format!("unknown stateStore kind '{other}'"),
+        )),
+    }
+}
+
+/// Fail fast with a typed error if `kind` is not a registered source kind.
+fn validate_source_kind(env: &Env, inner: &Inner, kind: &str) -> napi::Result<()> {
+    if inner.sources.lock().unwrap().contains_key(kind) {
+        Ok(())
+    } else {
+        Err(throw_coded(
+            env,
+            DrasiErrorCode::UnknownSourceKind,
+            format!("unknown source kind '{kind}'"),
+        ))
+    }
+}
+
+/// Fail fast with a typed error if `kind` is not a registered reaction kind.
+fn validate_reaction_kind(env: &Env, inner: &Inner, kind: &str) -> napi::Result<()> {
+    if inner.reactions.lock().unwrap().contains_key(kind) {
+        Ok(())
+    } else {
+        Err(throw_coded(
+            env,
+            DrasiErrorCode::UnknownReactionKind,
+            format!("unknown reaction kind '{kind}'"),
+        ))
+    }
+}
+
+/// Fail fast with a typed error if a provided `bootstrap` is missing its `kind`
+/// or names an unregistered bootstrap kind.
+fn validate_bootstrap(env: &Env, inner: &Inner, bootstrap: Option<&Value>) -> napi::Result<()> {
+    let Some(bs) = bootstrap else {
+        return Ok(());
+    };
+    let bs_kind = bs.get("kind").and_then(|v| v.as_str()).ok_or_else(|| {
+        throw_coded(
+            env,
+            DrasiErrorCode::BootstrapKindRequired,
+            "bootstrap.kind is required",
+        )
+    })?;
+    if inner.bootstrap.lock().unwrap().contains_key(bs_kind) {
+        Ok(())
+    } else {
+        Err(throw_coded(
+            env,
+            DrasiErrorCode::UnknownBootstrapKind,
+            format!("unknown bootstrap kind '{bs_kind}'"),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Async engine helpers (shared by the `#[napi]` wrappers and `fromConfig`)
+// ---------------------------------------------------------------------------
+
+/// Build and wrap a `DrasiLib` engine instance.
+///
+/// The config-resolver and callback contexts are built lazily on first plugin
+/// load (see `Inner::ensure_plugin_contexts`), so instances that never load
+/// cdylib plugins spawn no resolver thread and leak nothing.
+async fn build_engine(
+    id: String,
+    provider: Arc<dyn SecretStoreProvider>,
+    state_path: Option<String>,
+) -> napi::Result<Drasi> {
+    let mut builder = DrasiLib::builder()
+        .with_id(id.clone())
+        .with_secret_store_provider(provider.clone());
+    if let Some(path) = state_path {
+        let p = drasi_state_store_redb::RedbStateStoreProvider::new(&path).map_err(to_napi)?;
+        builder = builder.with_state_store_provider(Arc::new(p));
+    }
+    let core = builder.build().await.map_err(to_napi)?;
+    Ok(Drasi {
+        inner: Arc::new(Inner {
+            drasi: Arc::new(core),
+            sources: Mutex::new(HashMap::new()),
+            reactions: Mutex::new(HashMap::new()),
+            bootstrap: Mutex::new(HashMap::new()),
+            js_source_senders: Mutex::new(HashMap::new()),
+            watchers: Mutex::new(Vec::new()),
+            plugin_files: Mutex::new(HashMap::new()),
+            secret_provider: provider,
+            instance_id: id,
+            resolver_ctx: OnceLock::new(),
+            callback_ctx: OnceLock::new(),
+        }),
+    })
+}
+
+/// Create and register a source of the given `kind`, optionally attaching a
+/// bootstrap provider. Kind/bootstrap validation is expected to have run
+/// synchronously already (see [`validate_source_kind`] / [`validate_bootstrap`]);
+/// any lookup failure here surfaces as a generic engine error.
+async fn add_source_full(
+    inner: Arc<Inner>,
+    kind: String,
+    id: String,
+    config: Value,
+    auto_start: bool,
+    bootstrap: Option<Value>,
+) -> napi::Result<()> {
+    let descriptor = { inner.sources.lock().unwrap().get(&kind).cloned() }
+        .ok_or_else(|| coded_message(DrasiErrorCode::UnknownSourceKind, format!("unknown source kind '{kind}'")))?;
+
+    let source = descriptor
+        .create_source(&id, &config, auto_start)
+        .await
+        .map_err(to_napi)?;
+
+    if let Some(bs) = bootstrap {
+        let bs_kind = bs
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| coded_message(DrasiErrorCode::BootstrapKindRequired, "bootstrap.kind is required"))?
+            .to_string();
+        let bs_config = bs
+            .get("config")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        let bs_descriptor = { inner.bootstrap.lock().unwrap().get(&bs_kind).cloned() }
+            .ok_or_else(|| coded_message(DrasiErrorCode::UnknownBootstrapKind, format!("unknown bootstrap kind '{bs_kind}'")))?;
+        let provider = bs_descriptor
+            .create_bootstrap_provider(&bs_config, &config)
+            .await
+            .map_err(to_napi)?;
+        source.set_bootstrap_provider(provider).await;
+    }
+
+    let mut meta = HashMap::new();
+    meta.insert("kind".to_string(), kind);
+    inner
+        .drasi
+        .add_source_with_metadata(source, meta)
+        .await
+        .map_err(to_napi)
+}
+
+/// Create and register a reaction of the given `kind`. Kind validation is
+/// expected to have run synchronously already (see [`validate_reaction_kind`]).
+async fn add_reaction_full(
+    inner: Arc<Inner>,
+    kind: String,
+    id: String,
+    query_ids: Vec<String>,
+    config: Value,
+) -> napi::Result<()> {
+    let descriptor = { inner.reactions.lock().unwrap().get(&kind).cloned() }
+        .ok_or_else(|| coded_message(DrasiErrorCode::UnknownReactionKind, format!("unknown reaction kind '{kind}'")))?;
+
+    let reaction = descriptor
+        .create_reaction(&id, query_ids, &config, true)
+        .await
+        .map_err(to_napi)?;
+
+    let mut meta = HashMap::new();
+    meta.insert("kind".to_string(), kind);
+    inner
+        .drasi
+        .add_reaction_with_metadata(reaction, meta)
+        .await
+        .map_err(to_napi)
 }
 
 /// Parse the optional `joins` JSON (`[{ id, keys: [{ label, property }] }]`) into the
