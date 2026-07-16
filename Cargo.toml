@@ -41,5 +41,13 @@ chrono = "0.4"
 [build-dependencies]
 napi-build = "2"
 
+# Test/coverage-only: force napi-sys to resolve Node-API symbols at runtime
+# (libloading) instead of as link-time externs. This lets `cargo test` /
+# `cargo llvm-cov` link a standalone test harness on Linux (macOS already links
+# and MSVC always uses runtime loading). The shipped cdylib never enables this —
+# `napi build` builds without it — so runtime behavior of the addon is unchanged.
+[features]
+test-dyn = ["napi/dyn-symbols"]
+
 [profile.release]
 lto = true
