@@ -31,7 +31,7 @@ checkout is required.
 ## Development workflow
 
 ```bash
-npm install          # install JS dev dependencies (@napi-rs/cli, typescript)
+npm install          # install JS dev dependencies (@napi-rs/cli)
 npm run build        # napi build -> index.js, index.d.ts, and the .node addon
 npm test             # pretest builds example plugins from crates.io, then runs the suite
 ```
