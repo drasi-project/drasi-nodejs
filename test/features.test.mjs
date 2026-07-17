@@ -121,7 +121,12 @@ test('an invalid source config is rejected with the [CONFIG_INVALID] token', asy
 const waitUntil = async (fn, { timeout = 5000, interval = 50 } = {}) => {
   const start = Date.now();
   while (Date.now() - start < timeout) {
-    if (await fn()) return true;
+    try {
+      if (await fn()) return true;
+    } catch {
+      // Ignore transient errors (e.g. querying before it finishes auto-starting)
+      // and keep polling until the timeout.
+    }
     await sleep(interval);
   }
   return false;
