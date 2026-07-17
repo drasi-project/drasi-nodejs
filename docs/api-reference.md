@@ -159,10 +159,10 @@ Download a plugin artifact from an OCI registry to `destDir/filename`.
   `ghcr.io/drasi-project/source/postgres:0.1.13-windows-msvc-amd64`.
 - `options?: PullPluginOptions` — opt-in cosign enforcement (see below):
   - `verify?: boolean` — run cosign signature verification and record the status;
-    a `tampered` artifact is rejected.
+    a `tampered` — or valid-but-untrusted — artifact is rejected.
   - `requireSigned?: boolean` — additionally reject `unsigned` artifacts. Implies `verify`.
-  - `trustedIdentities?: { issuer, subjectPattern }[]` — trusted signing identities
-    (defaults to the drasi-project GitHub Actions identity).
+  - `trustedIdentities?: { issuer, subjectPattern }[]` — the signer allowlist
+    (defaults to the drasi-project GitHub Actions identity when omitted).
 
 **Returns:** `{ path: string, verification: PullPluginVerification }`. As of the
 team#97 work `verification` is a **structured object** (previously a debug-formatted
@@ -175,10 +175,14 @@ string) that is now **enforced** when verification is enabled (audit gap G5):
 ```
 
 With no `options` (or `verify: false`) the artifact is downloaded as before and
-`verification.status` is `"unsigned"`. When `verify` is set, a `tampered` artifact
-is deleted and the promise rejects with `PLUGIN_SIGNATURE_INVALID`; with
-`requireSigned` an `unsigned` artifact is likewise rejected. After a successful
-pull, call `loadPlugins(destDir)` (or `watchPlugins`) to register it.
+`verification.status` is `"unsigned"`. When `verify` is set: a `tampered` artifact,
+**or a `verified` one whose signer is not on the trusted-identity allowlist**, is
+deleted and the promise rejects with `PLUGIN_SIGNATURE_INVALID`; with
+`requireSigned` an `unsigned` artifact is likewise rejected. (The SDK's `verified`
+status only means the signature is cryptographically valid and chains to Sigstore —
+it does not itself check the signer against any allowlist — so the binding enforces
+`trustedIdentities` to prevent accepting a valid signature from an untrusted party.)
+After a successful pull, call `loadPlugins(destDir)` (or `watchPlugins`) to register it.
 
 ### `sourceConfigSchema(kind)` / `reactionConfigSchema(kind)` / `bootstrapConfigSchema(kind)` → `{ name, schema }` *(synchronous)*
 
@@ -331,12 +335,21 @@ Add a **durable, checkpointed** JavaScript reaction (audit gap G7).
 
 - `callback` is an **async** function `(result: QueryResultEvent) => Promise<void>`.
   The reaction **awaits** its promise and then persists a per-query checkpoint, so
-  a restart resumes without redelivering already-processed results (at-least-once
-  delivery). If the promise rejects, the checkpoint is not advanced and the result
-  is reprocessed. Empty batches are skipped.
+  a restart resumes **after the last checkpointed sequence** — results that were
+  processed but not yet checkpointed when the process died are re-delivered. Empty
+  batches are skipped.
 - `options?: { recoveryPolicy?: 'skipGap' | 'strict' }` — how to recover on a
   detected gap: `skipGap` (default) resumes from the latest available sequence;
   `strict` fails if the checkpointed position is unavailable.
+
+**Durability semantics (important):** this is **crash recovery of not-yet-checkpointed
+results**, *not* per-event at-least-once. If the callback's promise rejects, the
+failure is logged and that result's checkpoint is not advanced, but processing
+continues with the **next** result; the callback is **not** retried in-process, and
+a later success for the same query advances the checkpoint past the failed
+sequence (so it is not retried on restart either). True per-event at-least-once
+(halt-on-error / bounded retry) is tracked in
+[#21](https://github.com/drasi-project/drasi-nodejs/issues/21).
 
 **Requires a durable state store** (`{ stateStore: { kind: 'redb', path } }`) —
 otherwise throws `DURABLE_REQUIRES_STATE_STORE` synchronously. Pair with a
@@ -539,7 +552,7 @@ Each gap is mapped to an existing subtask of [team#85](https://github.com/drasi-
 | **G4** | ⚠️ **Largely resolved ([PR #5](https://github.com/drasi-project/drasi-nodejs/pull/5)).** Typed error codes added: validation errors throw synchronously with a stable `err.code` from the exported `DrasiErrorCode` enum (async/engine errors still reject with `GenericFailure` and carry a `[CODE]` token in the message). **Remaining:** `ComponentStatus` from `list*` is still a debug-formatted string, not a typed enum. | High | [team#98](https://github.com/drasi-project/team/issues/98) |
 | **G5** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97)).** `pullPlugin` accepts `{ verify, requireSigned, trustedIdentities }` and **enforces** cosign verification via the host SDK's `CosignVerifier`: a `tampered` (or, with `requireSigned`, `unsigned`) artifact is deleted and the promise rejects with `PLUGIN_SIGNATURE_INVALID`. `verification` is now a structured object (`{ status, issuer?, subject?, reason? }`). | High | [team#97](https://github.com/drasi-project/team/issues/97) |
 | **G6** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97), #16).** A RocksDB persistent query-index backend is now wired via a new `indexStore: { kind: 'rocksdb', path, enableArchive?, directIo? }` option on `create`/`fromConfig` (`with_default_index_provider` + `drasi-index-rocksdb`), so element/result indexes and the reaction outbox persist across restarts. (Adds a bundled RocksDB C++ build — CI/release install libclang for bindgen.) | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
-| **G7** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97), #17).** `addDurableJsReaction(id, queryIds, asyncCallback, options?)` opts a JS reaction into the engine's checkpoint/recovery machinery: it awaits the callback's promise and persists a per-query checkpoint after each success, dedups already-processed results on restart, and applies a recovery policy (`skipGap`/`strict`) for gaps — at-least-once delivery. Requires a durable state store (`DURABLE_REQUIRES_STATE_STORE` otherwise); pair with `indexStore` (G6) for cross-process outbox replay. | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
+| **G7** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97), #17).** `addDurableJsReaction(id, queryIds, asyncCallback, options?)` opts a JS reaction into the engine's checkpoint machinery: it awaits the callback's promise and persists a per-query checkpoint after each success, so a restart resumes after the last checkpointed sequence (crash recovery of not-yet-checkpointed results). Recovery policy (`skipGap`/`strict`) handles gaps. Requires a durable state store (`DURABLE_REQUIRES_STATE_STORE` otherwise); pair with `indexStore` (G6) for cross-process outbox replay. **Note:** a rejected callback is logged and **not** retried in-process, and a later success for the same query advances the checkpoint past it — so this is **not** per-event at-least-once; that is tracked in [#21](https://github.com/drasi-project/drasi-nodejs/issues/21). | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
 | **G8** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97), #20).** A built-in identity provider is wired via an `identity: { kind: 'password' \| 'token', … }` option on `create`/`fromConfig` (`with_identity_provider`), injecting credentials into sources/reactions that need them. Config is validated synchronously (`IDENTITY_KIND_REQUIRED`/`UNKNOWN_IDENTITY_KIND`/`IDENTITY_CONFIG_INVALID`). | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
 | **G9** | ⚠️ **Partially resolved ([team#97](https://github.com/drasi-project/team/issues/97)).** Each plugin kind's declared config schema is now exposed via `sourceConfigSchema`/`reactionConfigSchema`/`bootstrapConfigSchema` (from the descriptors' `config_schema_json()`), and a plugin's config rejection surfaces as a typed `CONFIG_INVALID` error instead of `GenericFailure`. **Remaining:** full in-Rust JSON-schema enforcement is deferred — the utoipa/OpenAPI dialect risks false-positive rejections of currently-valid configs; callers can validate against the exposed schema (e.g. ajv). | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
 | **G10** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97)).** `addQuery`/`updateQuery`/`fromConfig` now reject any `language` other than `"cypher"`/`"gql"` (or omitted) with a typed synchronous `UNKNOWN_QUERY_LANGUAGE` error instead of silently defaulting to Cypher. | Low | [team#97](https://github.com/drasi-project/team/issues/97) |

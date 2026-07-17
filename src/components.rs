@@ -37,9 +37,11 @@ pub type JsResultFn = ThreadsafeFunction<Value, (), Value, napi::Status, false, 
 
 /// A durable-reaction callback: like [`JsResultFn`] but the JS handler returns a
 /// `Promise<void>` (`(result) => Promise<void>`) whose resolution the reaction
-/// **awaits** before advancing its checkpoint. If the promise rejects, the
-/// checkpoint is not advanced and the event is reprocessed after a restart —
-/// giving at-least-once delivery (audit gap G7). Also unref'd (weak).
+/// **awaits** before advancing its checkpoint (audit gap G7). If the promise
+/// rejects, the failure is logged and that result's checkpoint is not advanced,
+/// but processing continues with the next result (the engine loop does not retry
+/// in-process — see #21). Durability is crash recovery of not-yet-checkpointed
+/// results, not per-event at-least-once. Also unref'd (weak).
 pub type JsDurableResultFn = ThreadsafeFunction<Value, Promise<()>, Value, napi::Status, false, true>;
 
 /// The callback backing a [`JsReaction`], selecting fire-and-forget delivery or
@@ -175,10 +177,12 @@ impl Reaction for JsReaction {
                 })
             }
             ReactionCallback::Durable(cb) => {
-                // Load persisted checkpoints so already-processed results are
-                // deduped, then run the engine's checkpoint-aware loop. The
-                // handler awaits the JS promise; a rejection leaves the checkpoint
-                // unchanged so the result is reprocessed after a restart.
+                // Load persisted checkpoints so already-checkpointed results are
+                // skipped, then run the engine's checkpoint-aware loop. The handler
+                // awaits the JS promise; on success the checkpoint advances to that
+                // sequence. On rejection the loop logs and moves on WITHOUT retrying
+                // (see the type docs / #21): durability is crash recovery of
+                // not-yet-checkpointed results, not per-event at-least-once.
                 let checkpoints = self.base.read_all_checkpoints().await.unwrap_or_default();
                 let base = self.base.clone_shared();
                 let callback = cb.clone();
@@ -191,9 +195,9 @@ impl Reaction for JsReaction {
                                     return Ok(());
                                 }
                                 let value = serde_json::to_value(&*event).unwrap_or(Value::Null);
-                                // Await both the call and the returned promise so
-                                // the checkpoint only advances once JS has processed
-                                // the result (at-least-once delivery).
+                                // Await both the call and the returned promise so the
+                                // checkpoint only advances once JS has finished
+                                // processing this result.
                                 let promise = callback.call_async(value).await?;
                                 promise.await?;
                                 Ok(())

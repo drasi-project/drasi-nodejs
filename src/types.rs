@@ -43,8 +43,9 @@ pub struct StateStoreOptions {
 /// Persistent RocksDB query-index backend options (audit gap G6).
 ///
 /// Unlike `stateStore` (redb, plugin runtime state), this persists the
-/// continuous-query indexes and the reaction outbox, so query state — and durable
-/// reactions' at-least-once delivery — survives process restarts.
+/// continuous-query indexes and the reaction outbox, so query state — and a
+/// durable reaction's checkpoint/outbox for crash recovery — survives process
+/// restarts.
 #[napi(object)]
 pub struct IndexStoreOptions {
     #[napi(ts_type = "'rocksdb'")]

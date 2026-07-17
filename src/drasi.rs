@@ -475,20 +475,28 @@ impl Drasi {
             })
             .unwrap_or_default();
 
-        let verifier = CosignVerifier::new(VerificationConfig {
+        let config = VerificationConfig {
             enabled: verify,
             trusted_identities,
-        });
+        };
+        // The effective allowlist (falls back to the drasi-project identity when
+        // the caller configures none) — enforced by the binding since the SDK's
+        // `Verified` status does not itself check the signer against any allowlist.
+        let effective_identities = config.effective_identities();
+        let verifier = CosignVerifier::new(config);
         let client = OciRegistryClient::with_verifier(RegistryConfig::default(), verifier);
         let result = client
             .download_plugin(&reference, std::path::Path::new(&dest_dir), &filename)
             .await
             .map_err(to_napi)?;
 
-        // Enforce the verification policy when verification is enabled: a tampered
-        // (or, with requireSigned, unsigned) artifact is deleted and rejected.
+        // Enforce the verification policy when verification is enabled: a tampered,
+        // untrusted-signer (or, with requireSigned, unsigned) artifact is deleted
+        // and rejected.
         if verify {
-            if let Err(reason) = verification_decision(&result.verification, require_signed) {
+            if let Err(reason) =
+                verification_decision(&result.verification, require_signed, &effective_identities)
+            {
                 let _ = tokio::fs::remove_file(&result.path).await;
                 return Err(coded_message(DrasiErrorCode::PluginSignatureInvalid, reason));
             }
@@ -887,9 +895,17 @@ impl Drasi {
     /// Unlike [`add_js_reaction`](Self::add_js_reaction), `callback` must be an
     /// async function `(result) => Promise<void>`; the reaction awaits its promise
     /// and persists a per-query checkpoint after each successfully processed
-    /// result. On restart it dedups already-processed results and applies the
-    /// recovery policy for gaps, giving at-least-once delivery. If the promise
-    /// rejects, the checkpoint is not advanced and the result is reprocessed.
+    /// result. On restart it resumes **after the last checkpointed sequence**, so
+    /// results that were processed-but-not-yet-checkpointed when the process died
+    /// are re-delivered — i.e. durability here is **crash recovery of
+    /// not-yet-checkpointed results**, not per-event at-least-once.
+    ///
+    /// If the promise rejects, the failure is logged and that result's checkpoint
+    /// is not advanced, but processing continues with the next result; the callback
+    /// is **not** retried in-process, and a later success for the same query
+    /// advances the checkpoint past the failed sequence (so it is not retried on
+    /// restart either). See #21 for tracking true per-event at-least-once
+    /// (halt-on-error / bounded retry).
     ///
     /// Requires a durable state store (`{ stateStore: { kind: 'redb', path } }`) —
     /// validated synchronously with `DURABLE_REQUIRES_STATE_STORE`. Pair with a
