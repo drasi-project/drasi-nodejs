@@ -47,10 +47,44 @@ jobs:
       - name: Build addon
         run: npm run build
 
+      - name: Type-check the generated .d.ts
+        run: npm run test:types
+
+      - name: Rust unit tests
+        # `test-dyn` forwards napi/dyn-symbols so napi-sys resolves Node-API
+        # symbols at runtime (libloading), letting a standalone test harness link
+        # on Linux (macOS already links; MSVC always uses runtime loading). The
+        # shipped cdylib is built by `npm run build` above and never enables this.
+        run: cargo test --features test-dyn
+
       - name: Test (pretest builds + stages example plugins)
         run: npm test
 
   # Cross-platform prebuilt binaries and npm publishing live in `release.yml`,
-  # which builds all five `napi.targets` on tag pushes (`v*`) and publishes the
-  # main package plus the per-platform optional-dependency packages with
-  # provenance. This workflow stays focused on fast per-PR validation.
+  # which builds the `napi.targets` on tag pushes (`v*`) and publishes the main
+  # package plus the per-platform optional-dependency packages with provenance.
+  # This workflow stays focused on fast per-PR validation.
+
+  # Meaningful coverage for a native addon lives in Rust: the JS surface is just
+  # the napi-generated loader, so we gate line coverage of the pure, FFI-free
+  # marshalling/validation logic (conversions.rs + error.rs) with cargo-llvm-cov.
+  # Pure logic is platform-independent, so a single-OS gate is sufficient; the
+  # cross-platform behavioral guarantee stays with `npm test` on all three OSes.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout drasi-nodejs
+        uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Rust coverage gate (pure logic)
+        run: |
+          cargo llvm-cov --features test-dyn --lib \
+            --ignore-filename-regex '(drasi|components|secrets|lib|types)\.rs$' \
+            --fail-under-lines 90 \
+            --summary-only
