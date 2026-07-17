@@ -1,5 +1,9 @@
 # @drasi/lib
 
+[![npm version](https://img.shields.io/npm/v/@drasi/lib)](https://www.npmjs.com/package/@drasi/lib)
+[![npm downloads](https://img.shields.io/npm/dm/@drasi/lib)](https://www.npmjs.com/package/@drasi/lib)
+[![license](https://img.shields.io/npm/l/@drasi/lib)](./LICENSE)
+
 Embed the [Drasi](https://drasi.io) continuous-query engine directly in your
 Node.js application. `@drasi/lib` is a native ([napi-rs](https://napi.rs))
 binding around Drasi's embeddable engine (`drasi-lib`) and its host SDK
@@ -235,6 +239,13 @@ Still to come:
 - Identity providers; declarative config-schema validation.
 - Prebuilt binaries for Intel macOS (`x86_64-apple-darwin`); Intel-mac users
   currently build from source.
+
+## Measuring success
+
+Adoption is tracked via npm downloads and dependents. See
+[`docs/metrics.md`](./docs/metrics.md) for how to read the numbers — the public
+npm downloads API, npmjs.com Insights/dependents, and third-party dashboards —
+plus the baseline and where to record targets.
 
 ## License
 

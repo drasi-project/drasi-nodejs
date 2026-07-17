@@ -1,0 +1,65 @@
+# Weekly npm download snapshot for @drasi/lib.
+#
+# Success for @drasi/lib is measured by npm downloads/dependents growth. npm
+# records this automatically; this workflow makes the headline number visible by
+# fetching the last-week download count from the public npm downloads API and
+# writing it to the run summary. See docs/metrics.md for the full picture
+# (dependents, range endpoints, npmjs.com Insights, third-party dashboards).
+#
+# The downloads API is public and unauthenticated, so no secrets are required.
+# The step is intentionally resilient: a not-yet-indexed package or a period
+# with no data returns an error/0, which is reported rather than failing the run.
+
+name: npm metrics
+
+on:
+  schedule:
+    # Mondays at 08:00 UTC.
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  downloads:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch last-week npm downloads
+        run: |
+          set -euo pipefail
+          PKG='@drasi/lib'
+          API="https://api.npmjs.org/downloads/point/last-week/${PKG}"
+
+          # --fail-with-body would abort on HTTP errors; instead capture whatever
+          # the API returns so we can report gracefully.
+          RESP="$(curl -s "$API" || echo '')"
+
+          # Extract "downloads": <n> if present; default to 0 otherwise.
+          DOWNLOADS="$(printf '%s' "$RESP" | jq -r '.downloads // empty' 2>/dev/null || true)"
+          START="$(printf '%s' "$RESP" | jq -r '.start // empty' 2>/dev/null || true)"
+          END="$(printf '%s' "$RESP" | jq -r '.end // empty' 2>/dev/null || true)"
+
+          {
+            echo "## npm downloads — ${PKG}"
+            echo ""
+            if [ -n "$DOWNLOADS" ]; then
+              echo "| Metric | Value |"
+              echo "| ------ | ----- |"
+              echo "| Downloads (last week) | ${DOWNLOADS} |"
+              echo "| Period | ${START:-?} → ${END:-?} |"
+            else
+              echo "No download data available yet for \`${PKG}\` (the package may"
+              echo "be newly published or had no downloads in the last week)."
+              echo ""
+              echo "<details><summary>Raw API response</summary>"
+              echo ""
+              echo '```json'
+              printf '%s\n' "${RESP:-<empty>}"
+              echo '```'
+              echo ""
+              echo "</details>"
+            fi
+            echo ""
+            echo "Source: <${API}> · see \`docs/metrics.md\` for more."
+          } >> "$GITHUB_STEP_SUMMARY"
