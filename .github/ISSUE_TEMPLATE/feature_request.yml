@@ -7,7 +7,7 @@ body:
       value: |
         Thanks for the suggestion! For larger changes, please align with the
         maintainers on the approach before writing code (see
-        [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md)).
+        [CONTRIBUTING.md](https://github.com/drasi-project/drasi-nodejs/blob/main/CONTRIBUTING.md)).
   - type: textarea
     id: problem
     attributes:
