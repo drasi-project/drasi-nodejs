@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use napi::bindgen_prelude::Promise;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
@@ -23,6 +24,7 @@ use tokio::sync::{mpsc, Mutex};
 use drasi_core::models::{Element, SourceChange};
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender, QueryResult, SubscriptionResponse};
+use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::{
     ComponentStatus, Reaction, ReactionBase, ReactionBaseParams, ReactionRuntimeContext, Source,
     SourceBase, SourceBaseParams, SourceRuntimeContext, SourceSubscriptionSettings,
@@ -33,6 +35,23 @@ use drasi_lib::{
 /// event loop alive on its own — the host application controls process lifetime.
 pub type JsResultFn = ThreadsafeFunction<Value, (), Value, napi::Status, false, true>;
 
+/// A durable-reaction callback: like [`JsResultFn`] but the JS handler returns a
+/// `Promise<void>` (`(result) => Promise<void>`) whose resolution the reaction
+/// **awaits** before advancing its checkpoint. If the promise rejects, the
+/// checkpoint is not advanced and the event is reprocessed after a restart —
+/// giving at-least-once delivery (audit gap G7). Also unref'd (weak).
+pub type JsDurableResultFn = ThreadsafeFunction<Value, Promise<()>, Value, napi::Status, false, true>;
+
+/// The callback backing a [`JsReaction`], selecting fire-and-forget delivery or
+/// durable, checkpoint-after-completion delivery.
+enum ReactionCallback {
+    /// Fire-and-forget: results are dispatched to JS without awaiting (default).
+    FireAndForget(Arc<JsResultFn>),
+    /// Durable: each result is awaited (the JS handler returns a promise) and the
+    /// checkpoint advances only on success.
+    Durable(Arc<JsDurableResultFn>),
+}
+
 // ============================================================================
 // JS-defined reaction
 // ============================================================================
@@ -41,17 +60,50 @@ pub type JsResultFn = ThreadsafeFunction<Value, (), Value, napi::Status, false, 
 ///
 /// The callback receives a structured query result object
 /// `{ query_id, sequence, results: [{ type, data, before?, after? }] }`.
+///
+/// A reaction may be **durable** (audit gap G7): when constructed with
+/// [`JsReaction::new_durable`] it opts into the engine's checkpoint/recovery
+/// machinery — it persists a per-query checkpoint after each successfully
+/// processed result (awaiting the JS handler's returned promise), dedups already-
+/// processed results on restart, and applies a recovery policy for gaps. Durable
+/// reactions require a durable state store (redb); a persistent index backend
+/// (rocksdb) additionally enables cross-process outbox replay.
 pub struct JsReaction {
     base: ReactionBase,
-    callback: Arc<JsResultFn>,
+    callback: ReactionCallback,
+    durable: bool,
+    recovery_policy: ReactionRecoveryPolicy,
 }
 
 impl JsReaction {
+    /// A fire-and-forget reaction: results are dispatched to `callback` without
+    /// awaiting and without checkpointing (the historical behavior).
     pub fn new(id: String, query_ids: Vec<String>, callback: JsResultFn) -> Self {
         let params = ReactionBaseParams::new(id, query_ids);
         Self {
             base: ReactionBase::new(params),
-            callback: Arc::new(callback),
+            callback: ReactionCallback::FireAndForget(Arc::new(callback)),
+            durable: false,
+            recovery_policy: ReactionRecoveryPolicy::AutoSkipGap,
+        }
+    }
+
+    /// A durable reaction: results are delivered to `callback` (whose promise is
+    /// awaited) and a checkpoint is persisted after each success, so a restart
+    /// resumes without redelivering already-processed results. Requires a durable
+    /// state store on the engine.
+    pub fn new_durable(
+        id: String,
+        query_ids: Vec<String>,
+        callback: JsDurableResultFn,
+        recovery_policy: ReactionRecoveryPolicy,
+    ) -> Self {
+        let params = ReactionBaseParams::new(id, query_ids).with_recovery_policy(recovery_policy);
+        Self {
+            base: ReactionBase::new(params),
+            callback: ReactionCallback::Durable(Arc::new(callback)),
+            durable: true,
+            recovery_policy,
         }
     }
 }
@@ -69,6 +121,7 @@ impl Reaction for JsReaction {
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         let mut m = HashMap::new();
         m.insert("queries".to_string(), serde_json::json!(self.base.queries));
+        m.insert("durable".to_string(), serde_json::json!(self.durable));
         m
     }
 
@@ -80,6 +133,14 @@ impl Reaction for JsReaction {
         self.base.get_auto_start()
     }
 
+    fn is_durable(&self) -> bool {
+        self.durable
+    }
+
+    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+        self.recovery_policy
+    }
+
     async fn initialize(&self, context: ReactionRuntimeContext) {
         self.base.initialize(context).await;
     }
@@ -89,26 +150,62 @@ impl Reaction for JsReaction {
             .set_status(ComponentStatus::Running, Some("JS reaction started".into()))
             .await;
 
-        let priority_queue = self.base.priority_queue.clone();
-        let callback = self.callback.clone();
-        let mut shutdown_rx = self.base.create_shutdown_channel().await;
+        let shutdown_rx = self.base.create_shutdown_channel().await;
 
-        let task = tokio::spawn(async move {
-            loop {
-                let result_arc = tokio::select! {
-                    biased;
-                    _ = &mut shutdown_rx => break,
-                    r = priority_queue.dequeue() => r,
-                };
+        let task = match &self.callback {
+            ReactionCallback::FireAndForget(cb) => {
+                let priority_queue = self.base.priority_queue.clone();
+                let callback = cb.clone();
+                let mut shutdown_rx = shutdown_rx;
+                tokio::spawn(async move {
+                    loop {
+                        let result_arc = tokio::select! {
+                            biased;
+                            _ = &mut shutdown_rx => break,
+                            r = priority_queue.dequeue() => r,
+                        };
 
-                if result_arc.results.is_empty() {
-                    continue;
-                }
+                        if result_arc.results.is_empty() {
+                            continue;
+                        }
 
-                let value = serde_json::to_value(&*result_arc).unwrap_or(Value::Null);
-                callback.call(value, ThreadsafeFunctionCallMode::NonBlocking);
+                        let value = serde_json::to_value(&*result_arc).unwrap_or(Value::Null);
+                        callback.call(value, ThreadsafeFunctionCallMode::NonBlocking);
+                    }
+                })
             }
-        });
+            ReactionCallback::Durable(cb) => {
+                // Load persisted checkpoints so already-processed results are
+                // deduped, then run the engine's checkpoint-aware loop. The
+                // handler awaits the JS promise; a rejection leaves the checkpoint
+                // unchanged so the result is reprocessed after a restart.
+                let checkpoints = self.base.read_all_checkpoints().await.unwrap_or_default();
+                let base = self.base.clone_shared();
+                let callback = cb.clone();
+                tokio::spawn(async move {
+                    let result = base
+                        .run_standard_loop(shutdown_rx, checkpoints, move |event: Arc<QueryResult>| {
+                            let callback = callback.clone();
+                            async move {
+                                if event.results.is_empty() {
+                                    return Ok(());
+                                }
+                                let value = serde_json::to_value(&*event).unwrap_or(Value::Null);
+                                // Await both the call and the returned promise so
+                                // the checkpoint only advances once JS has processed
+                                // the result (at-least-once delivery).
+                                let promise = callback.call_async(value).await?;
+                                promise.await?;
+                                Ok(())
+                            }
+                        })
+                        .await;
+                    if let Err(e) = result {
+                        log::error!("js durable reaction loop error: {e}");
+                    }
+                })
+            }
+        };
 
         self.base.set_processing_task(task).await;
         Ok(())

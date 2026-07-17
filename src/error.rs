@@ -74,6 +74,18 @@ pub enum DrasiErrorCode {
     ConfigInvalid,
     #[napi(value = "PLUGIN_SIGNATURE_INVALID")]
     PluginSignatureInvalid,
+    #[napi(value = "INDEX_STORE_PATH_REQUIRED")]
+    IndexStorePathRequired,
+    #[napi(value = "UNKNOWN_INDEX_STORE_KIND")]
+    UnknownIndexStoreKind,
+    #[napi(value = "IDENTITY_KIND_REQUIRED")]
+    IdentityKindRequired,
+    #[napi(value = "UNKNOWN_IDENTITY_KIND")]
+    UnknownIdentityKind,
+    #[napi(value = "IDENTITY_CONFIG_INVALID")]
+    IdentityConfigInvalid,
+    #[napi(value = "DURABLE_REQUIRES_STATE_STORE")]
+    DurableRequiresStateStore,
 }
 
 impl DrasiErrorCode {
@@ -97,6 +109,12 @@ impl DrasiErrorCode {
             DrasiErrorCode::UnknownQueryLanguage => "UNKNOWN_QUERY_LANGUAGE",
             DrasiErrorCode::ConfigInvalid => "CONFIG_INVALID",
             DrasiErrorCode::PluginSignatureInvalid => "PLUGIN_SIGNATURE_INVALID",
+            DrasiErrorCode::IndexStorePathRequired => "INDEX_STORE_PATH_REQUIRED",
+            DrasiErrorCode::UnknownIndexStoreKind => "UNKNOWN_INDEX_STORE_KIND",
+            DrasiErrorCode::IdentityKindRequired => "IDENTITY_KIND_REQUIRED",
+            DrasiErrorCode::UnknownIdentityKind => "UNKNOWN_IDENTITY_KIND",
+            DrasiErrorCode::IdentityConfigInvalid => "IDENTITY_CONFIG_INVALID",
+            DrasiErrorCode::DurableRequiresStateStore => "DURABLE_REQUIRES_STATE_STORE",
         }
     }
 }
@@ -194,6 +212,12 @@ mod tests {
             (DrasiErrorCode::UnknownQueryLanguage, "UNKNOWN_QUERY_LANGUAGE"),
             (DrasiErrorCode::ConfigInvalid, "CONFIG_INVALID"),
             (DrasiErrorCode::PluginSignatureInvalid, "PLUGIN_SIGNATURE_INVALID"),
+            (DrasiErrorCode::IndexStorePathRequired, "INDEX_STORE_PATH_REQUIRED"),
+            (DrasiErrorCode::UnknownIndexStoreKind, "UNKNOWN_INDEX_STORE_KIND"),
+            (DrasiErrorCode::IdentityKindRequired, "IDENTITY_KIND_REQUIRED"),
+            (DrasiErrorCode::UnknownIdentityKind, "UNKNOWN_IDENTITY_KIND"),
+            (DrasiErrorCode::IdentityConfigInvalid, "IDENTITY_CONFIG_INVALID"),
+            (DrasiErrorCode::DurableRequiresStateStore, "DURABLE_REQUIRES_STATE_STORE"),
         ];
         for (code, expected) in cases {
             assert_eq!(code.as_str(), expected);

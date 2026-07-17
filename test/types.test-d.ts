@@ -10,6 +10,7 @@ import type {
   ComponentStatusEntry,
   CreateOptions,
   DrasiConfig,
+  DurableReactionOptions,
   LifecycleMetrics,
   LoadPluginsResult,
   LogMessage,
@@ -30,6 +31,8 @@ async function construction(): Promise<void> {
   const opts: CreateOptions = {
     secrets: { API_KEY: 'shh' },
     stateStore: { kind: 'redb', path: '/tmp/state.redb' },
+    indexStore: { kind: 'rocksdb', path: '/tmp/idx', enableArchive: false, directIo: false },
+    identity: { kind: 'password', username: 'u', password: 'p' },
   }
   const d: Drasi = await Drasi.create('app', opts)
 
@@ -37,6 +40,8 @@ async function construction(): Promise<void> {
     id: 'app',
     secrets: { API_KEY: 'shh' },
     stateStore: { kind: 'redb', path: '/tmp/s.redb' },
+    indexStore: { kind: 'rocksdb', path: '/tmp/idx2' },
+    identity: { kind: 'token', token: 'abc' },
     pluginsDir: './plugins',
     sources: [
       {
@@ -133,6 +138,16 @@ async function reactions(d: Drasi): Promise<void> {
     void seq
     void result.metadata
   })
+  // Durable reaction: async callback returning a promise (gap G7).
+  const durableOpts: DurableReactionOptions = { recoveryPolicy: 'skipGap' }
+  await d.addDurableJsReaction(
+    'js-durable',
+    ['q'],
+    async (result: QueryResultEvent): Promise<void> => {
+      void result.sequence
+    },
+    durableOpts,
+  )
   await d.updateReaction('log', 'r', ['q'], {})
   const list: ComponentStatusEntry[] = await d.listReactions()
   void list

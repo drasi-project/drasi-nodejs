@@ -114,8 +114,88 @@ test('an invalid source config is rejected with the [CONFIG_INVALID] token', asy
   await d.close();
 });
 
-// Network tests against the public ghcr.io/drasi-project registry. Skipped by
-// default so offline `npm test` passes; run with DRASI_OCI_TESTS=1.
+// ---------------------------------------------------------------------------
+// Persistence, identity, and durable reactions (gaps G6, G8, G7)
+// ---------------------------------------------------------------------------
+
+const waitUntil = async (fn, { timeout = 5000, interval = 50 } = {}) => {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    if (await fn()) return true;
+    await sleep(interval);
+  }
+  return false;
+};
+
+// G6: a RocksDB persistent index backend is wired and query results flow through it.
+test('engine runs with a rocksdb index backend', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-rocks-'));
+  const d = await Drasi.create('t-rocks', { indexStore: { kind: 'rocksdb', path: join(dir, 'idx') } });
+  await d.start();
+  await d.addJsSource('g');
+  await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+  await d.pushChange('g', { op: 'insert', id: 't1', labels: ['Thing'], properties: { name: 'alice' } });
+  const ok = await waitUntil(async () => (await d.getQueryResults('q')).some((r) => r.name === 'alice'));
+  assert.ok(ok, 'query backed by rocksdb produced results');
+  await d.close();
+});
+
+// G8: a built-in password identity provider is accepted and the engine runs.
+test('engine builds with a password identity provider', async () => {
+  const d = await Drasi.create('t-identity', { identity: { kind: 'password', username: 'u', password: 'p' } });
+  await d.start();
+  await d.addJsSource('g');
+  await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+  await d.pushChange('g', { op: 'insert', id: 't1', labels: ['Thing'], properties: { name: 'bob' } });
+  const ok = await waitUntil(async () => (await d.getQueryResults('q')).some((r) => r.name === 'bob'));
+  assert.ok(ok, 'engine with an identity provider runs queries');
+  await d.close();
+});
+
+// G7: a durable reaction requires a durable state store (typed synchronous error).
+test('addDurableJsReaction without a state store throws DURABLE_REQUIRES_STATE_STORE', async () => {
+  const d = await Drasi.create('t-durable-nostore');
+  await d.start();
+  await d.addJsSource('g');
+  await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+  await assert.rejects(
+    async () => d.addDurableJsReaction('r', ['q'], async () => {}),
+    (err) => {
+      assert.equal(err.code, 'DURABLE_REQUIRES_STATE_STORE', `got ${err.code}`);
+      return true;
+    },
+  );
+  await d.close();
+});
+
+// G7: a durable reaction delivers results (awaiting the async callback) and
+// advances its persisted checkpoint.
+test('durable JS reaction delivers results and advances its checkpoint', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-durable-'));
+  const d = await Drasi.create('t-durable', {
+    stateStore: { kind: 'redb', path: join(dir, 'state.redb') },
+    indexStore: { kind: 'rocksdb', path: join(dir, 'idx') },
+  });
+  await d.start();
+  await d.addJsSource('g');
+  await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+  const seen = [];
+  await d.addDurableJsReaction('r', ['q'], async (result) => {
+    for (const diff of result.results) {
+      if (diff.data && diff.data.name) seen.push(diff.data.name);
+    }
+  });
+  await d.pushChange('g', { op: 'insert', id: 't1', labels: ['Thing'], properties: { name: 'carol' } });
+  const delivered = await waitUntil(() => seen.includes('carol'));
+  assert.ok(delivered, 'durable reaction received the result via its async callback');
+  // The checkpoint advanced for query q (proves durable checkpointing ran).
+  const advanced = await waitUntil(async () => {
+    const m = await d.getReactionMetrics('r');
+    return m.q && m.q.checkpointSequence >= 1;
+  });
+  assert.ok(advanced, 'durable reaction advanced its persisted checkpoint');
+  await d.close();
+});
 const ociSkip = process.env.DRASI_OCI_TESTS ? false : 'set DRASI_OCI_TESTS=1 to run OCI registry tests';
 
 test('OCI: list plugin tags from the public registry', { skip: ociSkip }, async () => {

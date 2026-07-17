@@ -40,12 +40,44 @@ pub struct StateStoreOptions {
     pub path: String,
 }
 
+/// Persistent RocksDB query-index backend options (audit gap G6).
+///
+/// Unlike `stateStore` (redb, plugin runtime state), this persists the
+/// continuous-query indexes and the reaction outbox, so query state — and durable
+/// reactions' at-least-once delivery — survives process restarts.
+#[napi(object)]
+pub struct IndexStoreOptions {
+    #[napi(ts_type = "'rocksdb'")]
+    pub kind: String,
+    pub path: String,
+    /// Enable the archive index for point-in-time queries (default false).
+    pub enable_archive: Option<bool>,
+    /// Use direct I/O (recommended for SSDs; default false).
+    pub direct_io: Option<bool>,
+}
+
+/// Built-in identity-provider options for credential injection (audit gap G8).
+///
+/// `kind: 'password'` supplies static username/password credentials; `kind:
+/// 'token'` supplies a bearer token (with an optional username). Credentials are
+/// injected into sources/reactions that connect to external systems.
+#[napi(object)]
+pub struct IdentityOptions {
+    #[napi(ts_type = "'password' | 'token'")]
+    pub kind: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub token: Option<String>,
+}
+
 /// Options accepted by `Drasi.create`.
 #[napi(object)]
 pub struct CreateOptions {
     #[napi(ts_type = "Record<string, string>")]
     pub secrets: Option<Value>,
     pub state_store: Option<StateStoreOptions>,
+    pub index_store: Option<IndexStoreOptions>,
+    pub identity: Option<IdentityOptions>,
 }
 
 /// A declarative source entry in [`DrasiConfig`].
@@ -87,6 +119,8 @@ pub struct DrasiConfig {
     #[napi(ts_type = "Record<string, string>")]
     pub secrets: Option<Value>,
     pub state_store: Option<StateStoreOptions>,
+    pub index_store: Option<IndexStoreOptions>,
+    pub identity: Option<IdentityOptions>,
     pub plugins_dir: Option<String>,
     pub sources: Option<Vec<SourceConfig>>,
     pub queries: Option<Vec<QueryConfig>>,
@@ -99,6 +133,16 @@ pub struct BootstrapConfig {
     pub kind: String,
     #[napi(ts_type = "Record<string, unknown>")]
     pub config: Option<Value>,
+}
+
+/// Options for a durable JavaScript reaction (`addDurableJsReaction`, audit gap G7).
+#[napi(object)]
+pub struct DurableReactionOptions {
+    /// Recovery policy applied on gap detection: `"skipGap"` (default) resumes
+    /// from the latest available sequence; `"strict"` fails if the checkpointed
+    /// position is unavailable.
+    #[napi(ts_type = "'skipGap' | 'strict'")]
+    pub recovery_policy: Option<String>,
 }
 
 /// A synthetic join key (`{ label, property }`).
