@@ -150,11 +150,68 @@ pub struct PluginKinds {
     pub bootstrap: Vec<String>,
 }
 
+/// A plugin kind's declared config schema (audit gap G9), returned by
+/// `sourceConfigSchema` / `reactionConfigSchema` / `bootstrapConfigSchema`.
+///
+/// `name` is the root config DTO key within `schema`, a `Record` of OpenAPI
+/// (utoipa) schema definitions keyed by schema name. Config is still marshaled as
+/// opaque JSON at runtime; this exposes the declared shape so callers can validate
+/// config (e.g. with a JSON-schema validator) before adding a component.
+#[napi(object)]
+pub struct PluginConfigSchema {
+    pub name: String,
+    #[napi(ts_type = "Record<string, unknown>")]
+    pub schema: Value,
+}
+
+/// Cosign verification outcome returned by `pullPlugin` (audit gap G5).
+///
+/// A tagged union on `status`:
+/// - `"unsigned"` — no signature was found (or verification was not requested).
+/// - `"verified"` — a valid signature chaining to the Sigstore root; `issuer`
+///   and `subject` identify the signer.
+/// - `"tampered"` — a signature exists but failed verification; `reason` explains
+///   why. When verification is enforced the artifact is deleted and the pull rejects.
+#[napi(object)]
+pub struct PullPluginVerification {
+    #[napi(ts_type = "'unsigned' | 'verified' | 'tampered'")]
+    pub status: String,
+    pub issuer: Option<String>,
+    pub subject: Option<String>,
+    pub reason: Option<String>,
+}
+
 /// The result of `pullPlugin`.
 #[napi(object)]
 pub struct PullPluginResult {
     pub path: String,
-    pub verification: String,
+    pub verification: PullPluginVerification,
+}
+
+/// Options for `pullPlugin` cosign signature enforcement (audit gap G5).
+///
+/// Verification is opt-in: with no options (or `verify: false`) the artifact is
+/// downloaded as before and `verification.status` is `"unsigned"`. When enabled,
+/// a `"tampered"` artifact is always rejected (and its file removed); an
+/// `"unsigned"` artifact is rejected only when `requireSigned` is set.
+#[napi(object)]
+pub struct PullPluginOptions {
+    /// Enable cosign signature verification (records status; rejects tampered).
+    pub verify: Option<bool>,
+    /// Require a valid signature — reject unsigned artifacts. Implies `verify`.
+    pub require_signed: Option<bool>,
+    /// Trusted signing identities. Defaults to the drasi-project GitHub identity.
+    pub trusted_identities: Option<Vec<TrustedIdentityOption>>,
+}
+
+/// A trusted cosign signing identity (`{ issuer, subjectPattern }`).
+#[napi(object)]
+pub struct TrustedIdentityOption {
+    /// OIDC issuer URL (matched exactly), e.g. `https://token.actions.githubusercontent.com`.
+    pub issuer: String,
+    /// Glob pattern matched against the certificate subject, e.g.
+    /// `https://github.com/drasi-project/*`.
+    pub subject_pattern: String,
 }
 
 // ---------------------------------------------------------------------------

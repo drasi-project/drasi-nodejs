@@ -68,6 +68,12 @@ pub enum DrasiErrorCode {
     StateStorePathRequired,
     #[napi(value = "UNKNOWN_STATE_STORE_KIND")]
     UnknownStateStoreKind,
+    #[napi(value = "UNKNOWN_QUERY_LANGUAGE")]
+    UnknownQueryLanguage,
+    #[napi(value = "CONFIG_INVALID")]
+    ConfigInvalid,
+    #[napi(value = "PLUGIN_SIGNATURE_INVALID")]
+    PluginSignatureInvalid,
 }
 
 impl DrasiErrorCode {
@@ -88,6 +94,9 @@ impl DrasiErrorCode {
             DrasiErrorCode::UnknownChangeOp => "UNKNOWN_CHANGE_OP",
             DrasiErrorCode::StateStorePathRequired => "STATE_STORE_PATH_REQUIRED",
             DrasiErrorCode::UnknownStateStoreKind => "UNKNOWN_STATE_STORE_KIND",
+            DrasiErrorCode::UnknownQueryLanguage => "UNKNOWN_QUERY_LANGUAGE",
+            DrasiErrorCode::ConfigInvalid => "CONFIG_INVALID",
+            DrasiErrorCode::PluginSignatureInvalid => "PLUGIN_SIGNATURE_INVALID",
         }
     }
 }
@@ -182,6 +191,9 @@ mod tests {
             (DrasiErrorCode::UnknownChangeOp, "UNKNOWN_CHANGE_OP"),
             (DrasiErrorCode::StateStorePathRequired, "STATE_STORE_PATH_REQUIRED"),
             (DrasiErrorCode::UnknownStateStoreKind, "UNKNOWN_STATE_STORE_KIND"),
+            (DrasiErrorCode::UnknownQueryLanguage, "UNKNOWN_QUERY_LANGUAGE"),
+            (DrasiErrorCode::ConfigInvalid, "CONFIG_INVALID"),
+            (DrasiErrorCode::PluginSignatureInvalid, "PLUGIN_SIGNATURE_INVALID"),
         ];
         for (code, expected) in cases {
             assert_eq!(code.as_str(), expected);

@@ -13,7 +13,9 @@ import type {
   LifecycleMetrics,
   LoadPluginsResult,
   LogMessage,
+  PluginConfigSchema,
   PluginKinds,
+  PullPluginOptions,
   PullPluginResult,
   QueryJoin,
   QueryMetrics,
@@ -64,7 +66,26 @@ async function plugins(d: Drasi): Promise<void> {
   void tags
   const pulled: PullPluginResult = await d.pullPlugin('ref:tag', './plugins', 'x.so')
   void pulled.path
-  void pulled.verification
+  // `verification` is a structured object (gap G5), not a debug string.
+  const status: 'unsigned' | 'verified' | 'tampered' = pulled.verification.status
+  void status
+  const issuer: string | undefined = pulled.verification.issuer
+  void issuer
+  // Opt-in verification options.
+  const opts: PullPluginOptions = {
+    verify: true,
+    requireSigned: false,
+    trustedIdentities: [{ issuer: 'https://x', subjectPattern: 'https://github.com/drasi-project/*' }],
+  }
+  const verified: PullPluginResult = await d.pullPlugin('ref:tag', './plugins', 'x.so', opts)
+  void verified.verification.reason
+  // Config-schema accessors (gap G9).
+  const srcSchema: PluginConfigSchema = d.sourceConfigSchema('mock')
+  void `${srcSchema.name}:${typeof srcSchema.schema}`
+  const rxnSchema: PluginConfigSchema = d.reactionConfigSchema('log')
+  void rxnSchema.name
+  const bsSchema: PluginConfigSchema = d.bootstrapConfigSchema('bs')
+  void bsSchema.name
 }
 
 async function sources(d: Drasi): Promise<void> {

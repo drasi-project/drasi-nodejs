@@ -112,7 +112,7 @@ method-by-method reference).
 
 | Area | Methods |
 | --- | --- |
-| Plugins | `loadPlugins(dir, verify?)`, `watchPlugins(dir)`, `pluginKinds()`, `listPluginTags(repo)`, `pullPlugin(reference, destDir, filename)` |
+| Plugins | `loadPlugins(dir, verify?)`, `watchPlugins(dir)`, `pluginKinds()`, `sourceConfigSchema(kind)`, `reactionConfigSchema(kind)`, `bootstrapConfigSchema(kind)`, `listPluginTags(repo)`, `pullPlugin(reference, destDir, filename, options?)` |
 | Sources | `addSource(kind, id, config, autoStart?, bootstrap?)`, `addJsSource(id, autoStart?)`, `pushChange(sourceId, change)`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources` |
 | Queries | `addQuery(id, query, sources, language?, joins?)`, `updateQuery`, `startQuery`, `stopQuery`, `removeQuery`, `getQueryResults(id)`, `listQueries` |
 | Reactions | `addReaction(kind, id, queryIds, config)`, `addJsReaction(id, queryIds, cb)`, `updateReaction`, `startReaction`, `stopReaction`, `removeReaction`, `listReactions` |
@@ -120,7 +120,8 @@ method-by-method reference).
 | Streaming | `onAllEvents(cb)`, `onQueryEvents(id, cb)`, `onSourceEvents(id, cb)`, `onReactionEvents(id, cb)`, `onSourceLogs(id, cb)`, `onQueryLogs(id, cb)`, `onReactionLogs(id, cb)` |
 | Lifecycle | `start()`, `stop()`, `close()` |
 
-`language` is `"cypher"` (default) or `"gql"`. `pushChange` emits nodes, or
+`language` is `"cypher"` (default) or `"gql"` — any other value is rejected with a
+typed `UNKNOWN_QUERY_LANGUAGE` error. `pushChange` emits nodes, or
 **relations** when `change` includes `startId`/`endId`. Generated TypeScript types
 are in `index.d.ts`. Callbacks are unref'd, so they don't keep the Node process
 alive on their own.
@@ -219,20 +220,24 @@ pinned versions alongside `drasi-plugin-sdk` when upgrading the SDK.
 ## Roadmap
 
 Implemented: dynamic plugin loading (+ optional SHA-256 verification), OCI plugin
-fetch from `ghcr.io/drasi-project` (`pullPlugin`/`listPluginTags`), JS sources
-(nodes + relations + bootstrap replay) and reactions, event & log streaming,
-secret/env config resolution for plugins, bootstrap-provider wiring, persistent
-state store (redb), plugin hot-reload, lifecycle/update APIs, concrete public
-TypeScript types with typed error codes (`DrasiErrorCode`), and metrics accessors.
-Published to npm with cross-platform prebuilt binaries and build provenance (see
+fetch from `ghcr.io/drasi-project` (`pullPlugin`/`listPluginTags`) with opt-in
+cosign signature enforcement, JS sources (nodes + relations + bootstrap replay)
+and reactions, event & log streaming, secret/env config resolution for plugins,
+bootstrap-provider wiring, persistent state store (redb), plugin hot-reload,
+lifecycle/update APIs, concrete public TypeScript types with typed error codes
+(`DrasiErrorCode`), plugin config-schema accessors with typed config validation
+errors, query-language validation, and metrics accessors. Published to npm with
+cross-platform prebuilt binaries and build provenance (see
 [`docs/releasing.md`](./docs/releasing.md)).
 
 Still to come:
 
-- Cosign signature/lockfile enforcement on OCI pulls (verification status is
-  surfaced today; enforcement is opt-in/future).
-- RocksDB index provider; durable (checkpointed) JS reactions.
-- Identity providers; declarative config-schema validation.
+- RocksDB index provider (blocked on the RocksDB C++ cross-compile burden for the
+  prebuilt-binary matrix); durable (checkpointed) JS reactions (build on the
+  persistent index backend above).
+- Identity providers; full in-engine JSON-schema config validation (schemas are
+  already exposed via `sourceConfigSchema`/`reactionConfigSchema` for client-side
+  validation today).
 - Prebuilt binaries for Intel macOS (`x86_64-apple-darwin`); Intel-mac users
   currently build from source.
 

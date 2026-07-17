@@ -65,6 +65,55 @@ test('metrics accessors return numeric snapshots', async () => {
   await d.close();
 });
 
+// Config-schema exposure + typed config errors (gap G9).
+test('config schema accessors expose a plugin kind\'s declared schema', async () => {
+  const d = await Drasi.create('t-schema');
+  await d.loadPlugins(pluginsDir);
+
+  const src = d.sourceConfigSchema('mock');
+  assert.equal(src.name, 'source.mock.MockSourceConfig', 'root config DTO name');
+  assert.equal(typeof src.schema, 'object', 'schema is an object map');
+  assert.ok(src.schema[src.name], 'schema map contains the root config DTO');
+
+  const rxn = d.reactionConfigSchema('log');
+  assert.equal(typeof rxn.name, 'string', 'reaction schema has a name');
+  assert.ok(rxn.schema && rxn.schema[rxn.name], 'reaction schema map contains its root');
+
+  await d.close();
+});
+
+test('config schema accessors throw a typed error for unknown kinds', async () => {
+  const d = await Drasi.create('t-schema-unknown');
+  await d.loadPlugins(pluginsDir);
+  const cases = [
+    [() => d.sourceConfigSchema('nope'), 'UNKNOWN_SOURCE_KIND'],
+    [() => d.reactionConfigSchema('nope'), 'UNKNOWN_REACTION_KIND'],
+    [() => d.bootstrapConfigSchema('nope'), 'UNKNOWN_BOOTSTRAP_KIND'],
+  ];
+  for (const [fn, code] of cases) {
+    assert.throws(fn, (err) => {
+      assert.equal(err.code, code, `expected ${code}, got ${err.code}`);
+      return true;
+    });
+  }
+  await d.close();
+});
+
+test('an invalid source config is rejected with the [CONFIG_INVALID] token', async () => {
+  const d = await Drasi.create('t-config-invalid');
+  await d.loadPlugins(pluginsDir);
+  await d.start();
+  // The mock DTO uses deny_unknown_fields, so an unknown field fails to deserialize.
+  await assert.rejects(
+    async () => d.addSource('mock', 'src', { bogusField: true }),
+    (err) => {
+      assert.match(err.message, /\[CONFIG_INVALID\]/);
+      return true;
+    },
+  );
+  await d.close();
+});
+
 // Network tests against the public ghcr.io/drasi-project registry. Skipped by
 // default so offline `npm test` passes; run with DRASI_OCI_TESTS=1.
 const ociSkip = process.env.DRASI_OCI_TESTS ? false : 'set DRASI_OCI_TESTS=1 to run OCI registry tests';
@@ -96,11 +145,20 @@ test('OCI: pull a plugin artifact to disk', { skip: ociSkip }, async () => {
   const ext = process.platform === 'win32' ? 'dll' : process.platform === 'darwin' ? 'dylib' : 'so';
   const prefix = process.platform === 'win32' ? '' : 'lib';
   const filename = `${prefix}drasi_source_postgres.${ext}`;
-  const result = await d.pullPlugin(
-    `ghcr.io/drasi-project/source/postgres:${match}`,
-    dest,
-    filename,
-  );
+  const reference = `ghcr.io/drasi-project/source/postgres:${match}`;
+
+  // Default (no options): downloads and reports an unenforced verification status.
+  const result = await d.pullPlugin(reference, dest, filename);
   assert.ok(existsSync(result.path), `downloaded plugin exists at ${result.path}`);
+  assert.equal(result.verification.status, 'unsigned', 'no verification requested');
+
+  // With verification enabled the status is a structured, known value (gap G5).
+  const verified = await d.pullPlugin(reference, dest, filename, { verify: true });
+  assert.ok(
+    ['unsigned', 'verified', 'tampered'].includes(verified.verification.status),
+    `structured verification status, got ${verified.verification.status}`,
+  );
+  // A legitimate drasi-project artifact must never verify as tampered.
+  assert.notEqual(verified.verification.status, 'tampered', 'genuine artifact is not tampered');
   await d.close();
 });

@@ -283,6 +283,49 @@ test('malformed joins are rejected', async () => {
   await d.close();
 });
 
+// An unsupported/typo `language` is a typed synchronous error (gap G10) rather
+// than a silent fall-back to Cypher.
+test('addQuery rejects an unknown query language with UNKNOWN_QUERY_LANGUAGE', async () => {
+  const d = await Drasi.create('t-badlang');
+  await d.start();
+  await d.addJsSource('s');
+  for (const bad of ['sql', 'Cypher', 'GQL', 'cyper']) {
+    await rejectsWithCode(
+      () => d.addQuery('q', 'MATCH (n) RETURN n', ['s'], bad),
+      'UNKNOWN_QUERY_LANGUAGE',
+      new RegExp(bad),
+    );
+  }
+  // The documented values still work (and default/cypher/gql are accepted).
+  await d.addQuery('q-ok', 'MATCH (n) RETURN n', ['s']);
+  await d.close();
+});
+
+test('updateQuery rejects an unknown query language with UNKNOWN_QUERY_LANGUAGE', async () => {
+  const d = await Drasi.create('t-badlang-update');
+  await d.start();
+  await d.addJsSource('s');
+  await d.addQuery('q', 'MATCH (n) RETURN n', ['s']);
+  await rejectsWithCode(
+    () => d.updateQuery('q', 'MATCH (n) RETURN n', ['s'], 'sql'),
+    'UNKNOWN_QUERY_LANGUAGE',
+    /sql/,
+  );
+  await d.close();
+});
+
+test('fromConfig rejects an unknown query language with UNKNOWN_QUERY_LANGUAGE', async () => {
+  await rejectsWithCode(
+    () =>
+      Drasi.fromConfig({
+        id: 'cfg-badlang',
+        queries: [{ id: 'q', query: 'MATCH (n) RETURN n', sources: [], language: 'sql' }],
+      }),
+    'UNKNOWN_QUERY_LANGUAGE',
+    /sql/,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Relation edge cases (aliases + delete)
 // ---------------------------------------------------------------------------

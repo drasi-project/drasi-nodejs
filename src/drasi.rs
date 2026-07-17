@@ -30,9 +30,10 @@ use drasi_plugin_sdk::{
 };
 
 use crate::components::{JsReaction, JsResultFn, JsSource};
-use crate::conversions::json_to_source_change;
+use crate::conversions::{json_to_source_change, plugin_config_schema, resolve_query_language};
 use crate::error::{coded_message, throw_coded, to_napi, DrasiErrorCode};
 use crate::secrets::{build_config_resolver_context, config_resolver_callback, ConfigResolverContext};
+use crate::verification::{verification_decision, verification_to_json};
 
 /// File patterns for discovering cdylib plugins (Unix + Windows naming).
 const PLUGIN_FILE_PATTERNS: &[&str] = &[
@@ -263,6 +264,10 @@ impl Drasi {
             let text = req_str(&q, "query")?;
             let srcs = str_vec(&q, "sources");
             let language = q.get("language").and_then(|v| v.as_str()).map(String::from);
+            // Validate the language synchronously so a typo throws a typed
+            // `err.code` up front instead of silently becoming Cypher (gap G10).
+            resolve_query_language(language.as_deref())
+                .map_err(|r| throw_coded(env, r.code, r.message))?;
             let joins = q.get("joins").cloned();
             queries.push((qid, text, srcs, language, joins));
         }
@@ -289,7 +294,9 @@ impl Drasi {
                     .await?;
             }
             for (qid, text, srcs, language, joins) in queries {
-                drasi.add_query(qid, text, srcs, language, joins).await?;
+                let is_gql = language.as_deref() == Some("gql");
+                let def = build_query_def(qid, text, srcs, is_gql, joins)?;
+                drasi.inner.drasi.add_query(def).await.map_err(to_napi)?;
             }
             for (kind, rid, qs, cfg) in reactions {
                 add_reaction_full(drasi.inner.clone(), kind, rid, qs, cfg).await?;
@@ -391,24 +398,81 @@ impl Drasi {
     ///
     /// `reference` is a full OCI reference, e.g.
     /// `"ghcr.io/drasi-project/source/postgres:0.1.13-windows-msvc-amd64"`.
+    ///
+    /// Cosign verification is opt-in via `options` (audit gap G5). With none (or
+    /// `verify: false`) the artifact is downloaded and `verification.status` is
+    /// `"unsigned"`. When `verify` is set, the signature is checked and its status
+    /// surfaced; a `"tampered"` artifact is always rejected — its file is removed
+    /// and the promise rejects with `PLUGIN_SIGNATURE_INVALID`. With `requireSigned`
+    /// an `"unsigned"` artifact is likewise rejected.
+    ///
     /// Returns `{ path, verification }`. After pulling, call `loadPlugins(destDir)`
     /// (or `watchPlugins`) to register it.
-    #[napi(ts_return_type = "Promise<PullPluginResult>")]
+    #[napi(
+        ts_args_type = "reference: string, destDir: string, filename: string, options?: PullPluginOptions",
+        ts_return_type = "Promise<PullPluginResult>"
+    )]
     pub async fn pull_plugin(
         &self,
         reference: String,
         dest_dir: String,
         filename: String,
+        options: Option<Value>,
     ) -> napi::Result<Value> {
-        use drasi_host_sdk::registry::{OciRegistryClient, RegistryConfig};
-        let client = OciRegistryClient::new(RegistryConfig::default());
+        use drasi_host_sdk::registry::{
+            CosignVerifier, OciRegistryClient, RegistryConfig, TrustedIdentity, VerificationConfig,
+        };
+
+        // Parse opt-in verification options. `requireSigned` implies verification.
+        let opts = options.as_ref();
+        let require_signed = opts
+            .and_then(|o| o.get("requireSigned"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let verify = require_signed
+            || opts
+                .and_then(|o| o.get("verify"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        let trusted_identities: Vec<TrustedIdentity> = opts
+            .and_then(|o| o.get("trustedIdentities"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        let issuer = t.get("issuer").and_then(|v| v.as_str())?;
+                        let subject = t.get("subjectPattern").and_then(|v| v.as_str())?;
+                        Some(TrustedIdentity {
+                            issuer: issuer.to_string(),
+                            subject_pattern: subject.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let verifier = CosignVerifier::new(VerificationConfig {
+            enabled: verify,
+            trusted_identities,
+        });
+        let client = OciRegistryClient::with_verifier(RegistryConfig::default(), verifier);
         let result = client
             .download_plugin(&reference, std::path::Path::new(&dest_dir), &filename)
             .await
             .map_err(to_napi)?;
+
+        // Enforce the verification policy when verification is enabled: a tampered
+        // (or, with requireSigned, unsigned) artifact is deleted and rejected.
+        if verify {
+            if let Err(reason) = verification_decision(&result.verification, require_signed) {
+                let _ = tokio::fs::remove_file(&result.path).await;
+                return Err(coded_message(DrasiErrorCode::PluginSignatureInvalid, reason));
+            }
+        }
+
         Ok(serde_json::json!({
             "path": result.path.to_string_lossy().to_string(),
-            "verification": format!("{:?}", result.verification),
+            "verification": verification_to_json(&result.verification),
         }))
     }
 
@@ -425,6 +489,54 @@ impl Drasi {
             "reactions": reactions,
             "bootstrap": bootstrap,
         })
+    }
+
+    /// Return the config schema advertised by a registered **source** plugin kind
+    /// as `{ name, schema }` (audit gap G9). `name` is the root config DTO key
+    /// within `schema`, an object of OpenAPI (utoipa) schema definitions. Throws a
+    /// typed `UNKNOWN_SOURCE_KIND` error if the kind is not registered.
+    ///
+    /// Config is still marshaled as opaque JSON at runtime; this exposes the
+    /// plugin's declared schema so callers can validate config (e.g. with ajv)
+    /// before `addSource`. Malformed config is also surfaced as a typed
+    /// `CONFIG_INVALID` error from `addSource`/`updateSource`.
+    #[napi(ts_return_type = "PluginConfigSchema")]
+    pub fn source_config_schema(&self, env: &Env, kind: String) -> napi::Result<Value> {
+        let descriptor = { self.inner.sources.lock().unwrap().get(&kind).cloned() }.ok_or_else(
+            || throw_coded(env, DrasiErrorCode::UnknownSourceKind, format!("unknown source kind '{kind}'")),
+        )?;
+        Ok(plugin_config_schema(
+            descriptor.config_schema_name(),
+            &descriptor.config_schema_json(),
+        ))
+    }
+
+    /// Return the config schema advertised by a registered **reaction** plugin
+    /// kind as `{ name, schema }` (audit gap G9). Throws a typed
+    /// `UNKNOWN_REACTION_KIND` error if the kind is not registered.
+    #[napi(ts_return_type = "PluginConfigSchema")]
+    pub fn reaction_config_schema(&self, env: &Env, kind: String) -> napi::Result<Value> {
+        let descriptor = { self.inner.reactions.lock().unwrap().get(&kind).cloned() }.ok_or_else(
+            || throw_coded(env, DrasiErrorCode::UnknownReactionKind, format!("unknown reaction kind '{kind}'")),
+        )?;
+        Ok(plugin_config_schema(
+            descriptor.config_schema_name(),
+            &descriptor.config_schema_json(),
+        ))
+    }
+
+    /// Return the config schema advertised by a registered **bootstrap** plugin
+    /// kind as `{ name, schema }` (audit gap G9). Throws a typed
+    /// `UNKNOWN_BOOTSTRAP_KIND` error if the kind is not registered.
+    #[napi(ts_return_type = "PluginConfigSchema")]
+    pub fn bootstrap_config_schema(&self, env: &Env, kind: String) -> napi::Result<Value> {
+        let descriptor = { self.inner.bootstrap.lock().unwrap().get(&kind).cloned() }.ok_or_else(
+            || throw_coded(env, DrasiErrorCode::UnknownBootstrapKind, format!("unknown bootstrap kind '{kind}'")),
+        )?;
+        Ok(plugin_config_schema(
+            descriptor.config_schema_name(),
+            &descriptor.config_schema_json(),
+        ))
     }
 
     // ------------------------------------------------------------------
@@ -573,7 +685,7 @@ impl Drasi {
             let source = descriptor
                 .create_source(&id, &config, auto_start.unwrap_or(true))
                 .await
-                .map_err(to_napi)?;
+                .map_err(|e| coded_message(DrasiErrorCode::ConfigInvalid, e.to_string()))?;
             inner.drasi.update_source(&id, source).await.map_err(to_napi)
         })
     }
@@ -606,33 +718,30 @@ impl Drasi {
     /// `language` is `"cypher"` (default) or `"gql"`. `joins` is an optional array of
     /// synthetic join definitions (`[{ id, keys: [{ label, property }] }]`) used to
     /// relate elements across sources that have no explicit relationship.
+    ///
+    /// `language` is validated synchronously (a value other than `"cypher"`/`"gql"`
+    /// throws a typed `err.code`); building and registering the query resolves
+    /// asynchronously.
     #[napi(
-        ts_args_type = "id: string, query: string, sources: Array<string>, language?: 'cypher' | 'gql', joins?: QueryJoin[]"
+        ts_args_type = "id: string, query: string, sources: Array<string>, language?: 'cypher' | 'gql', joins?: QueryJoin[]",
+        ts_return_type = "Promise<void>"
     )]
-    pub async fn add_query(
+    pub fn add_query<'a>(
         &self,
+        env: &'a Env,
         id: String,
         query: String,
         sources: Vec<String>,
         language: Option<String>,
         joins: Option<Value>,
-    ) -> napi::Result<()> {
-        let mut builder = match language.as_deref() {
-            Some("gql") => Query::gql(id),
-            _ => Query::cypher(id),
-        };
-        builder = builder.query(query);
-        for source in sources {
-            builder = builder.from_source(source);
-        }
-        if let Some(joins) = joins {
-            builder = builder.with_joins(parse_joins(joins)?);
-        }
-        self.inner
-            .drasi
-            .add_query(builder.build())
-            .await
-            .map_err(to_napi)
+    ) -> napi::Result<PromiseRaw<'a, ()>> {
+        let is_gql = resolve_query_language(language.as_deref())
+            .map_err(|r| throw_coded(env, r.code, r.message))?;
+        let inner = self.inner.clone();
+        env.spawn_future(async move {
+            let def = build_query_def(id, query, sources, is_gql, joins)?;
+            inner.drasi.add_query(def).await.map_err(to_napi)
+        })
     }
 
     /// Remove a query by id.
@@ -644,33 +753,28 @@ impl Drasi {
     /// Replace a query's definition in place (same id).
     ///
     /// `joins` matches `addQuery`: an optional array of synthetic join definitions.
+    /// `language` is validated synchronously (typed `err.code`); the replacement
+    /// resolves asynchronously.
     #[napi(
-        ts_args_type = "id: string, query: string, sources: Array<string>, language?: 'cypher' | 'gql', joins?: QueryJoin[]"
+        ts_args_type = "id: string, query: string, sources: Array<string>, language?: 'cypher' | 'gql', joins?: QueryJoin[]",
+        ts_return_type = "Promise<void>"
     )]
-    pub async fn update_query(
+    pub fn update_query<'a>(
         &self,
+        env: &'a Env,
         id: String,
         query: String,
         sources: Vec<String>,
         language: Option<String>,
         joins: Option<Value>,
-    ) -> napi::Result<()> {
-        let mut builder = match language.as_deref() {
-            Some("gql") => Query::gql(id.clone()),
-            _ => Query::cypher(id.clone()),
-        };
-        builder = builder.query(query);
-        for source in sources {
-            builder = builder.from_source(source);
-        }
-        if let Some(joins) = joins {
-            builder = builder.with_joins(parse_joins(joins)?);
-        }
-        self.inner
-            .drasi
-            .update_query(&id, builder.build())
-            .await
-            .map_err(to_napi)
+    ) -> napi::Result<PromiseRaw<'a, ()>> {
+        let is_gql = resolve_query_language(language.as_deref())
+            .map_err(|r| throw_coded(env, r.code, r.message))?;
+        let inner = self.inner.clone();
+        env.spawn_future(async move {
+            let def = build_query_def(id.clone(), query, sources, is_gql, joins)?;
+            inner.drasi.update_query(&id, def).await.map_err(to_napi)
+        })
     }
 
     /// Start a query by id.
@@ -785,7 +889,7 @@ impl Drasi {
             let reaction = descriptor
                 .create_reaction(&id, query_ids, &config, true)
                 .await
-                .map_err(to_napi)?;
+                .map_err(|e| coded_message(DrasiErrorCode::ConfigInvalid, e.to_string()))?;
             inner.drasi.update_reaction(&id, reaction).await.map_err(to_napi)
         })
     }
@@ -1138,7 +1242,7 @@ async fn add_source_full(
     let source = descriptor
         .create_source(&id, &config, auto_start)
         .await
-        .map_err(to_napi)?;
+        .map_err(|e| coded_message(DrasiErrorCode::ConfigInvalid, e.to_string()))?;
 
     if let Some(bs) = bootstrap {
         let bs_kind = bs
@@ -1155,7 +1259,7 @@ async fn add_source_full(
         let provider = bs_descriptor
             .create_bootstrap_provider(&bs_config, &config)
             .await
-            .map_err(to_napi)?;
+            .map_err(|e| coded_message(DrasiErrorCode::ConfigInvalid, e.to_string()))?;
         source.set_bootstrap_provider(provider).await;
     }
 
@@ -1183,7 +1287,7 @@ async fn add_reaction_full(
     let reaction = descriptor
         .create_reaction(&id, query_ids, &config, true)
         .await
-        .map_err(to_napi)?;
+        .map_err(|e| coded_message(DrasiErrorCode::ConfigInvalid, e.to_string()))?;
 
     let mut meta = HashMap::new();
     meta.insert("kind".to_string(), kind);
@@ -1198,6 +1302,27 @@ async fn add_reaction_full(
 /// drasi-lib `QueryJoinConfig` list consumed by `Query::with_joins`.
 fn parse_joins(joins: Value) -> napi::Result<Vec<drasi_lib::config::QueryJoinConfig>> {
     serde_json::from_value(joins).map_err(to_napi)
+}
+
+/// Build a drasi-lib [`Query`] definition from validated parts. `is_gql` selects
+/// the GQL builder (already validated by [`resolve_query_language`]); everything
+/// else uses Cypher. Shared by `addQuery`/`updateQuery` and `fromConfig`.
+fn build_query_def(
+    id: String,
+    query: String,
+    sources: Vec<String>,
+    is_gql: bool,
+    joins: Option<Value>,
+) -> napi::Result<drasi_lib::QueryConfig> {
+    let mut builder = if is_gql { Query::gql(id) } else { Query::cypher(id) };
+    builder = builder.query(query);
+    for source in sources {
+        builder = builder.from_source(source);
+    }
+    if let Some(joins) = joins {
+        builder = builder.with_joins(parse_joins(joins)?);
+    }
+    Ok(builder.build())
 }
 
 /// Scan `dir` for cdylib plugins and register their descriptors into `inner`.
