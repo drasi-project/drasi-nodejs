@@ -36,13 +36,11 @@ npm run build        # napi build -> index.js, index.d.ts, and the .node addon
 npm test             # pretest builds example plugins from crates.io, then runs the suite
 ```
 
-Useful checks (all are enforced in CI):
+Useful checks (enforced in CI):
 
-```bash
-cargo clippy -- -D warnings    # Rust lint (must be clean)
-npm run test:types             # type-check the generated index.d.ts (tsc --strict --isolatedModules)
-cargo test --features test-dyn # Rust unit tests for the pure conversion/error logic
-```
+    cargo clippy -- -D warnings # Rust lint (must be clean)
+    npm run build               # napi build -> index.js, index.d.ts, and the .node addon
+    npm test                    # runs the Node.js test runner (pretest builds example plugins)
 
 Notes:
 
