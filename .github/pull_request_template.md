@@ -20,7 +20,6 @@
 
 - [ ] I have added or updated tests where appropriate
 - [ ] `npm test` passes locally
-- [ ] `npm run test:types` passes (public types type-check)
 - [ ] `cargo clippy -- -D warnings` is clean
 - [ ] Documentation updated if needed (e.g. `docs/api-reference.md`, `README.md`)
 - [ ] All commits are signed off (DCO — `git commit -s`)
