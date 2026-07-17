@@ -1,6 +1,6 @@
 [package]
 name = "drasi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Embed the Drasi continuous-query engine in Node.js, with dynamic plugin loading and JavaScript-defined sources and reactions"

@@ -9,6 +9,27 @@ release process.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-17
+
+### Added
+
+- Concrete public TypeScript types: the generated `index.d.ts` is now
+  self-contained, with concrete config/result/callback shapes instead of `any`.
+  The companion `types.d.ts` has been removed.
+- Typed error codes via the `DrasiErrorCode` enum. Argument-validation errors
+  throw synchronously with a stable, machine-readable `err.code`; async/engine
+  errors carry the stable code as a `[CODE]` token in the message.
+- `SourceChangeInput.op` type and the related validation messages now document
+  the `add`/`remove` aliases the parser accepts.
+- Rust unit tests for the pure conversion/error logic plus a `cargo-llvm-cov`
+  coverage gate in CI, and expanded error/edge and leak/soak integration tests.
+
+### Note
+
+- These changes were intended for `0.1.0` but were omitted because the source
+  PRs merged into their stacked parent branches rather than `main`. `0.1.1`
+  delivers them.
+
 ## [0.1.0] - 2026-07-16
 
 ### Added
@@ -29,5 +50,6 @@ release process.
   packages with npm build provenance (OIDC-first, `NPM_TOKEN` fallback).
 - Maintainer release guide (`docs/releasing.md`) and this changelog.
 
-[Unreleased]: https://github.com/drasi-project/drasi-nodejs/compare/v0.1.0...main
+[Unreleased]: https://github.com/drasi-project/drasi-nodejs/compare/v0.1.1...main
+[0.1.1]: https://github.com/drasi-project/drasi-nodejs/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/drasi-project/drasi-nodejs/releases/tag/v0.1.0
