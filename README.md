@@ -12,11 +12,13 @@ binding around Drasi's embeddable engine (`drasi-lib`) and its host SDK
 - **JavaScript-defined components** — define a **reaction** as a JS callback, or a
   **source** you push changes into from your own code. No Rust required.
 
-> Status: early. The core engine, dynamic plugin loading, JS sources/reactions,
-> streaming, lifecycle management and a secret store are implemented and tested.
-> OCI plugin fetch and persistence providers are on the roadmap (see below).
-> Cross-platform prebuilt binaries and the npm release pipeline are wired up (see
-> [`docs/releasing.md`](./docs/releasing.md)); the first stable publish is pending.
+> Status: pre-1.0 but functional and published to npm. The core engine, dynamic
+> plugin loading with OCI plugin fetch (from `ghcr.io/drasi-project`), JS
+> sources/reactions, streaming, lifecycle management, a secret store, a persistent
+> state store (redb), concrete TypeScript types with typed error codes, and
+> metrics are implemented and tested. Distributed with prebuilt binaries for
+> Windows (x64), Linux (x64/arm64), and Apple-silicon macOS (arm64). The API is
+> still evolving ahead of 1.0 — see the Roadmap below.
 
 ## Install
 
@@ -130,16 +132,64 @@ auto-start individually. (Adding everything and then calling `start()` also work
 
 ## Types
 
-Companion helper types are available in `types.d.ts` for config and callback
-shapes that the generated `index.d.ts` currently exposes as `any`.
+The generated `index.d.ts` is self-contained: every config/result parameter and
+return, plus the callback payloads, is exposed with a concrete TypeScript type
+(no bare `any`). Import them directly from the package.
 
 ```ts
-import type { SourceChangeInput, QueryResultEvent } from '@drasi/lib/types.d.ts';
+import type { SourceChangeInput, QueryResultEvent } from '@drasi/lib';
 const change: SourceChangeInput = { op: 'insert', id: 'o1', labels: ['Order'] };
 const onResult = (event: QueryResultEvent) => console.log(event.results.length);
 ```
 
-They can also be referenced with a `/// <reference path="..." />` directive.
+## Error handling
+
+Argument/validation failures throw a stable, machine-readable **code** so callers
+can branch on it instead of matching human-readable messages. `DrasiErrorCode` is
+exported as a regular (non-`const`) `enum` with string values — it is safe under
+`isolatedModules` / esbuild / swc / Vite and has a real runtime value, so both the
+type and value are usable:
+
+```ts
+import { DrasiErrorCode } from '@drasi/lib';
+
+try {
+  await drasi.addSource('unknown', 's', {});
+} catch (err) {
+  if ((err as { code?: string }).code === DrasiErrorCode.UnknownSourceKind) {
+    // handle the unregistered-kind case
+  }
+}
+```
+
+Because napi-rs can only attach a custom `code` on a **synchronous** throw (async
+promise rejections are forced to `code === 'GenericFailure'`), the two error
+classes behave as follows — the human-readable message is the same in both cases:
+
+- **Synchronous throws (`err.code` is the stable code).** Argument validation runs
+  synchronously, before the method returns its `Promise`. This covers, on their
+  normal paths: `UNKNOWN_SOURCE_KIND`, `UNKNOWN_REACTION_KIND`,
+  `UNKNOWN_BOOTSTRAP_KIND`, `BOOTSTRAP_KIND_REQUIRED`, `MISSING_CONFIG_FIELD`,
+  `NO_JS_SOURCE`, `JS_SOURCE_CLOSED`, `CHANGE_NOT_OBJECT`, `CHANGE_OP_REQUIRED`,
+  `CHANGE_ID_REQUIRED`, `RELATION_REQUIRES_BOTH_ENDS`, `UNKNOWN_CHANGE_OP`,
+  `STATE_STORE_PATH_REQUIRED`, and `UNKNOWN_STATE_STORE_KIND`. Note this means
+  validation errors surface as a **synchronous throw** rather than a rejected
+  promise — transparent to `await`/`try` callers, but a bare
+  `p = fn(); p.catch(...)` (no `await`) will not catch them.
+- **Async fallbacks (message-only; `err.code === 'GenericFailure'`).** A few paths
+  can only fail after the async work has begun: component creation inside
+  `fromConfig` (plugin kinds resolve after the async plugin load) and the rare
+  race where a JS source closes mid-`pushChange`. There the stable code is embedded
+  in the message as a trailing `[CODE]` token (e.g.
+  `unknown source kind 'x' [UNKNOWN_SOURCE_KIND]`) so a single check still works:
+
+```ts
+function drasiCode(err: unknown): string | undefined {
+  const e = err as { code?: string; message?: string };
+  if (e.code && e.code !== 'GenericFailure') return e.code;        // sync throw
+  return e.message?.match(/\[([A-Z_]+)\]\s*$/)?.[1];               // async fallback
+}
+```
 
 ## How it works
 
@@ -172,7 +222,10 @@ Implemented: dynamic plugin loading (+ optional SHA-256 verification), OCI plugi
 fetch from `ghcr.io/drasi-project` (`pullPlugin`/`listPluginTags`), JS sources
 (nodes + relations + bootstrap replay) and reactions, event & log streaming,
 secret/env config resolution for plugins, bootstrap-provider wiring, persistent
-state store (redb), plugin hot-reload, and lifecycle/update APIs.
+state store (redb), plugin hot-reload, lifecycle/update APIs, concrete public
+TypeScript types with typed error codes (`DrasiErrorCode`), and metrics accessors.
+Published to npm with cross-platform prebuilt binaries and build provenance (see
+[`docs/releasing.md`](./docs/releasing.md)).
 
 Still to come:
 
@@ -180,15 +233,8 @@ Still to come:
   surfaced today; enforcement is opt-in/future).
 - RocksDB index provider; durable (checkpointed) JS reactions.
 - Identity providers; declarative config-schema validation.
-- Richer TypeScript types for configs/results (companion `types.d.ts` ships today);
-  typed error codes.
-
-Recently wired up (first stable publish pending, see
-[`docs/releasing.md`](./docs/releasing.md)):
-
-- Prebuilt binaries for Windows (x64), Linux (x64/arm64), and Apple-silicon macOS
-  (arm64), distributed as per-platform npm packages, plus a tag-triggered release
-  pipeline that publishes with build provenance.
+- Prebuilt binaries for Intel macOS (`x86_64-apple-darwin`); Intel-mac users
+  currently build from source.
 
 ## License
 
