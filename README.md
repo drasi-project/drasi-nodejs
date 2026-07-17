@@ -192,4 +192,11 @@ Recently wired up (first stable publish pending, see
 
 ## License
 
-Apache-2.0
+Licensed under the Apache License, Version 2.0 — see [LICENSE](./LICENSE).
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for the
+development workflow and the DCO sign-off requirement, and
+[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md). To report a security issue, see
+[SECURITY.md](./SECURITY.md).

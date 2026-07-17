@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Discord
+    url: https://aka.ms/drasidiscord
+    about: Ask questions and chat with maintainers and the community.
+  - name: 📚 Documentation
+    url: https://drasi.io
+    about: Learn how to use Drasi.
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/drasi-project/drasi-nodejs/blob/main/SECURITY.md
+    about: Please report security issues privately, not as a public issue.
