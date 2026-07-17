@@ -49,8 +49,7 @@ curl -s https://api.npmjs.org/downloads/range/last-month/@drasi/lib
 Notes:
 
 - The API is public and unauthenticated — safe to call from CI without secrets.
-- A brand-new or low-traffic package may return `{"error":"package @drasi/lib
-  not found"}` or `downloads: 0` for a period before it has data. Callers should
+- A brand-new or low-traffic package may return `{"error":"package @drasi/lib not found"}` or `downloads: 0` for a period before it has data. Callers should
   handle that gracefully rather than treating it as a failure.
 
 ## npmjs.com (Insights & dependents)
