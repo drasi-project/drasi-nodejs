@@ -58,7 +58,7 @@ Notes:
 3. Ensure the full check set above passes locally.
 4. **Sign off every commit** (DCO — see below).
 5. Open a PR, link the related issue, and describe your change. CI must be green
-   (build/test on Windows, macOS, and Linux, plus the coverage gate and DCO check).
+   (build/test on Windows, macOS, and Linux, plus the DCO check).
 
 ## Developer Certificate of Origin (DCO)
 
