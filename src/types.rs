@@ -45,7 +45,9 @@ pub struct StateStoreOptions {
 /// Unlike `stateStore` (redb, plugin runtime state), this persists the
 /// continuous-query indexes and the reaction outbox, so query state — and a
 /// durable reaction's checkpoint/outbox for crash recovery — survives process
-/// restarts.
+/// restarts. RocksDB holds a process-exclusive lock on `path` (released on
+/// process exit, not necessarily on `close()`), so a path is usable by one engine
+/// at a time and cross-restart recovery happens in a fresh process.
 #[napi(object)]
 pub struct IndexStoreOptions {
     #[napi(ts_type = "'rocksdb'")]

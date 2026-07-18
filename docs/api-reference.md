@@ -87,7 +87,10 @@ Create a new, **not-yet-started** engine instance.
   — enables a **persistent query-index backend** (audit gap G6). Unlike
   `stateStore`, this persists the continuous-query indexes (element/result
   indexes, future queue) and the reaction outbox, so query state survives
-  restarts. Made the default backend for every query.
+  restarts. Made the default backend for every query. **Note:** RocksDB holds a
+  process-exclusive lock on `path`, released when the process exits (not
+  necessarily on `close()`), so a given path may be used by only one engine at a
+  time and cross-restart recovery happens in a fresh process.
 - `identity?: { kind: 'password' | 'token', username?, password?, token? }` —
   wires a built-in identity provider (audit gap G8) that injects credentials into
   sources/reactions connecting to external systems.

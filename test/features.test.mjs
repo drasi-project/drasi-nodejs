@@ -8,8 +8,9 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, existsSync, mkdtempSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 
 const require = createRequire(import.meta.url);
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -143,6 +144,60 @@ test('engine runs with a rocksdb index backend', async () => {
   const ok = await waitUntil(async () => (await d.getQueryResults('q')).some((r) => r.name === 'alice'));
   assert.ok(ok, 'query backed by rocksdb produced results');
   await d.close();
+});
+
+// G6: query index state persists across a full engine restart. A rocksdb
+// indexStore holds a process-exclusive lock (released on process exit, not on
+// `close()`), so a genuine restart is a NEW process — this test runs the write and
+// the read in separate child processes sharing the same index path, and the read
+// process must recover the prior result WITHOUT re-pushing any source data.
+test('rocksdb index state persists across an engine restart (separate processes)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-rocks-persist-'));
+  const idxPath = join(dir, 'idx');
+  const addon = join(root, 'index.js');
+
+  // A tiny driver run in a child process: opens a rocksdb-backed engine at the
+  // given path, (optionally) pushes one node, and prints whether the query holds
+  // it. Written to a temp file so `node --test` doesn't pick it up as a test.
+  const helper = join(dir, 'persist-child.mjs');
+  writeFileSync(
+    helper,
+    `import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const [,, addonPath, mode, path] = process.argv;
+const { Drasi } = require(addonPath);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitUntil = async (fn, t = 4000) => {
+  const s = Date.now();
+  while (Date.now() - s < t) { try { if (await fn()) return true; } catch {} await sleep(50); }
+  return false;
+};
+const d = await Drasi.create('persist', { indexStore: { kind: 'rocksdb', path } });
+await d.start();
+await d.addJsSource('g');
+await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+if (mode === 'write') {
+  await d.pushChange('g', { op: 'insert', id: 't1', labels: ['Thing'], properties: { name: 'alice' } });
+}
+const ok = await waitUntil(async () => (await d.getQueryResults('q')).some((r) => r.name === 'alice'));
+process.stdout.write('RESULT=' + (ok ? 'true' : 'false'));
+await d.close();
+`,
+  );
+
+  const run = (mode) =>
+    execFileSync('node', [helper, addon, mode, idxPath], {
+      cwd: root,
+      env: { ...process.env, RUST_LOG: 'error' },
+      encoding: 'utf8',
+    });
+
+  // Process 1 writes and checkpoints the result to the rocksdb index, then exits
+  // (releasing the lock).
+  assert.match(run('write'), /RESULT=true/, 'write process computed the result');
+  // Process 2 opens the SAME index path and, without pushing anything, recovers
+  // the prior result from disk.
+  assert.match(run('read'), /RESULT=true/, 'restart process recovered the persisted result without re-pushing');
 });
 
 // G8: a built-in password identity provider is accepted and the engine runs.
