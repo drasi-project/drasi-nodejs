@@ -497,7 +497,15 @@ impl Drasi {
             if let Err(reason) =
                 verification_decision(&result.verification, require_signed, &effective_identities)
             {
-                let _ = tokio::fs::remove_file(&result.path).await;
+                // Best-effort removal of the rejected artifact; if it fails, tell the
+                // caller so they don't assume a rejected file was cleaned up.
+                let reason = match tokio::fs::remove_file(&result.path).await {
+                    Ok(()) => reason,
+                    Err(e) => format!(
+                        "{reason} (warning: failed to remove the downloaded artifact at {}: {e})",
+                        result.path.display()
+                    ),
+                };
                 return Err(coded_message(DrasiErrorCode::PluginSignatureInvalid, reason));
             }
         }

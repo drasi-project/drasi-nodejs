@@ -227,7 +227,7 @@ streaming, secret/env config resolution for plugins, bootstrap-provider wiring,
 persistent state store (redb) and persistent query-index backend (RocksDB),
 identity providers, plugin hot-reload, lifecycle/update APIs, concrete public
 TypeScript types with typed error codes (`DrasiErrorCode`), plugin config-schema
-accessors with typed config validation errors, query-language validation, and
+accessors with tokenized config-validation errors, query-language validation, and
 metrics accessors. Published to npm with cross-platform prebuilt binaries and
 build provenance (see [`docs/releasing.md`](./docs/releasing.md)).
 

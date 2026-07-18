@@ -151,10 +151,12 @@ pub fn resolve_query_language(language: Option<&str>) -> Result<bool, CodedReaso
 /// (audit gap G9) from a plugin descriptor's schema name and its
 /// `config_schema_json()` output (a JSON object mapping OpenAPI schema names to
 /// their definitions). `name` is the key of the root config DTO. If the schema
-/// JSON fails to parse — never expected from a well-formed plugin — `schema` is
-/// `null` so the accessor still returns the name rather than throwing.
+/// JSON fails to parse — never expected from a well-formed plugin — `schema` falls
+/// back to an **empty object** (not `null`), so the returned shape always matches
+/// the declared `Record<string, unknown>` type.
 pub fn plugin_config_schema(name: &str, schema_json: &str) -> Value {
-    let schema = serde_json::from_str::<Value>(schema_json).unwrap_or(Value::Null);
+    let schema = serde_json::from_str::<Value>(schema_json)
+        .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
     serde_json::json!({ "name": name, "schema": schema })
 }
 
@@ -393,6 +395,8 @@ mod tests {
     fn plugin_config_schema_tolerates_unparseable_schema() {
         let v = plugin_config_schema("x", "not json");
         assert_eq!(v["name"], "x");
-        assert!(v["schema"].is_null(), "schema falls back to null");
+        // Falls back to an empty object (not null) to match the declared type.
+        assert!(v["schema"].is_object(), "schema falls back to an empty object");
+        assert_eq!(v["schema"].as_object().unwrap().len(), 0);
     }
 }
