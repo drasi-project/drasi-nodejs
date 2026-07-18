@@ -54,6 +54,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # RocksDB (via librocksdb-sys) compiles bundled C++ and runs bindgen, which
+      # needs libclang. macOS ships it with the CLT; Linux needs the dev package
+      # and Windows needs LLVM on LIBCLANG_PATH.
+      - name: Install libclang for rocksdb bindgen (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - name: Point bindgen at LLVM (Windows)
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+        shell: pwsh
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

@@ -17,5 +17,6 @@ mod drasi;
 mod error;
 mod secrets;
 mod types;
+mod verification;
 
 pub use drasi::Drasi;

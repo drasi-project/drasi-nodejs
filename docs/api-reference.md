@@ -10,8 +10,8 @@ This document is the authoritative inventory of the public API exposed by the
 [Gap analysis](#gap-analysis--tracked-follow-ups) section.
 
 > **Update:** this audit has been reconciled with the fixes that followed it —
-> gaps **G1–G4, G11, G12** and the **G13** pipeline are now resolved or largely
-> resolved (see the ✅/⚠️ status markers in the
+> gaps **G1–G3, G5–G8, G10, G11, G12** and the **G13** pipeline are now resolved,
+> with **G4** and **G9** partially resolved (see the ✅/⚠️ status markers in the
 > [Gap analysis](#gap-analysis--tracked-follow-ups) table). The inline
 > method/shape sections describe the audited surface with resolution notes inline.
 
@@ -56,7 +56,7 @@ object unless marked **static**.
 | Plugins | `loadPlugins`, `watchPlugins`, `listPluginTags`, `pullPlugin`, `pluginKinds`² |
 | Sources | `addSource`, `addJsSource`, `pushChange`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources` |
 | Queries | `addQuery`, `updateQuery`, `startQuery`, `stopQuery`, `getQueryResults`, `removeQuery`, `listQueries` |
-| Reactions | `addReaction`, `addJsReaction`, `updateReaction`, `startReaction`, `stopReaction`, `removeReaction`, `listReactions` |
+| Reactions | `addReaction`, `addJsReaction`, `addDurableJsReaction`, `updateReaction`, `startReaction`, `stopReaction`, `removeReaction`, `listReactions` |
 | Metrics | `getQueryMetrics`, `getReactionMetrics`, `getLifecycleMetrics` |
 | Streaming | `onAllEvents`, `onQueryEvents`, `onSourceEvents`, `onReactionEvents`, `onSourceLogs`, `onQueryLogs`, `onReactionLogs` |
 | Lifecycle | `start`, `stop`, `close` |
@@ -82,12 +82,28 @@ Create a new, **not-yet-started** engine instance.
   cdylib plugins resolve `ConfigValue::Secret` references against. Non-string
   values are silently ignored.
 - `stateStore?: { kind: 'redb', path: string }` — enables a persistent plugin
-  state store.
+  state store (plugin runtime state; also required by durable reactions).
+- `indexStore?: { kind: 'rocksdb', path: string, enableArchive?: boolean, directIo?: boolean }`
+  — enables a **persistent query-index backend** (audit gap G6). Unlike
+  `stateStore`, this persists the continuous-query indexes (element/result
+  indexes, future queue) and the reaction outbox, so query state survives
+  restarts. Made the default backend for every query. **Note:** RocksDB holds a
+  process-exclusive lock on `path`, released when the process exits (not
+  necessarily on `close()` — see
+  [#22](https://github.com/drasi-project/drasi-nodejs/issues/22)), so a given path
+  may be used by only one engine at a time and cross-restart recovery happens in a
+  fresh process.
+- `identity?: { kind: 'password' | 'token', username?, password?, token? }` —
+  wires a built-in identity provider (audit gap G8) that injects credentials into
+  sources/reactions connecting to external systems.
 
 **Returns:** a `Drasi` instance.
-**Errors:** `stateStore.path is required for redb` when `kind: 'redb'` and no
-`path`; `unknown stateStore kind '<x>'` for any other kind; engine build errors
-propagate as-is.
+**Errors:** `stateStore.path is required for redb` / `unknown stateStore kind '<x>'`;
+`indexStore.path is required for rocksdb` (`INDEX_STORE_PATH_REQUIRED`) /
+`unknown indexStore kind '<x>'` (`UNKNOWN_INDEX_STORE_KIND`); `identity.kind is
+required` (`IDENTITY_KIND_REQUIRED`), `unknown identity kind '<x>'`
+(`UNKNOWN_IDENTITY_KIND`), or a missing credential field (`IDENTITY_CONFIG_INVALID`);
+engine build errors propagate as-is.
 
 ### `Drasi.fromConfig(config)` → `Promise<Drasi>` *(static)*
 
@@ -97,7 +113,7 @@ and reaction (which auto-start on the running engine).
 
 `config` (`DrasiConfig`, passed as `any`):
 - `id?: string` (default `"drasi"`)
-- `secrets?`, `stateStore?` — forwarded to `create`.
+- `secrets?`, `stateStore?`, `indexStore?`, `identity?` — forwarded to `create`.
 - `pluginsDir?: string` — if present, `loadPlugins(pluginsDir)` runs before start.
 - `sources?: Array<{ kind, id, config?, autoStart?, bootstrap? }>`
 - `queries?: Array<{ id, query, sources, language?, joins? }>`
@@ -140,17 +156,59 @@ the process lifetime). Reload failures are logged, not thrown.
 List available tags for a plugin repo in the configured OCI registry (default
 `ghcr.io/drasi-project`), e.g. `listPluginTags("source/postgres")`.
 
-### `pullPlugin(reference, destDir, filename)` → `Promise<{ path, verification }>`
+### `pullPlugin(reference, destDir, filename, options?)` → `Promise<{ path, verification }>`
 
 Download a plugin artifact from an OCI registry to `destDir/filename`.
 
 - `reference: string` — full OCI reference, e.g.
   `ghcr.io/drasi-project/source/postgres:0.1.13-windows-msvc-amd64`.
+- `options?: PullPluginOptions` — opt-in cosign enforcement (see below):
+  - `verify?: boolean` — run cosign signature verification and record the status;
+    a `tampered` — or valid-but-untrusted — artifact is rejected.
+  - `requireSigned?: boolean` — additionally reject `unsigned` artifacts. Implies `verify`.
+  - `trustedIdentities?: { issuer, subjectPattern }[]` — the signer allowlist
+    (defaults to the drasi-project GitHub Actions identity when omitted).
 
-**Returns:** `{ path: string, verification: string }`. ⚠️ `verification` is a
-**debug-formatted string** of the SDK's verification result — status is surfaced
-but **not enforced** (see [G5](#gap-analysis--tracked-follow-ups)). After pulling,
-call `loadPlugins(destDir)` (or `watchPlugins`) to register it.
+**Returns:** `{ path: string, verification: PullPluginVerification }`. As of the
+team#97 work `verification` is a **structured object** (previously a debug-formatted
+string) that is now **enforced** when verification is enabled (audit gap G5):
+
+```ts
+{ status: 'unsigned' }                       // no signature (or verify not requested)
+{ status: 'verified', issuer, subject }      // valid signature chaining to Sigstore
+{ status: 'tampered', reason }               // a signature exists but did not verify
+```
+
+With no `options` (or `verify: false`) the artifact is downloaded as before and
+`verification.status` is `"unsigned"`. When `verify` is set: a `tampered` artifact,
+**or a `verified` one whose signer is not on the trusted-identity allowlist**, is
+deleted and the promise **rejects** — because this is an async path, napi cannot
+attach a typed `err.code`, so the rejection is a `GenericFailure` whose message
+carries the stable `[PLUGIN_SIGNATURE_INVALID]` token (see
+[Error behavior](#error-behavior)); with `requireSigned` an `unsigned` artifact is
+likewise rejected. (The SDK's `verified` status only means the signature is
+cryptographically valid and chains to Sigstore — it does not itself check the
+signer against any allowlist — so the binding enforces `trustedIdentities` to
+prevent accepting a valid signature from an untrusted party.) After a successful
+pull, call `loadPlugins(destDir)` (or `watchPlugins`) to register it.
+
+### `sourceConfigSchema(kind)` / `reactionConfigSchema(kind)` / `bootstrapConfigSchema(kind)` → `{ name, schema }` *(synchronous)*
+
+Return the config schema a registered plugin `kind` declares, as
+`{ name: string, schema: Record<string, unknown> }` (audit gap G9). `name` is the
+root config DTO key within `schema`, an object of OpenAPI (utoipa) schema
+definitions keyed by schema name (an empty object if a plugin's schema JSON is
+unparseable — never expected from a well-formed plugin). Because these accessors
+are **synchronous**, an unregistered kind throws with a real, typed `err.code`
+(`UNKNOWN_SOURCE_KIND` / `UNKNOWN_REACTION_KIND` / `UNKNOWN_BOOTSTRAP_KIND`).
+
+Config is still marshaled as opaque JSON at runtime, but this exposes each plugin's
+declared shape so callers can validate config (e.g. with a JSON-schema validator
+such as ajv) *before* calling `addSource`/`addReaction`. A malformed config is also
+surfaced when the plugin rejects it: since `addSource`/`addReaction`/`update*` are
+**async**, that rejection is a `GenericFailure` whose message carries the stable
+`[CONFIG_INVALID]` token rather than a typed `err.code` (see
+[Error behavior](#error-behavior)).
 
 ### `pluginKinds()` → `{ sources, reactions, bootstrap }` *(synchronous)*
 
@@ -235,7 +293,7 @@ Add a continuous query.
 | `id` | `string` | — | Query id. |
 | `query` | `string` | — | Cypher or GQL text. |
 | `sources` | `string[]` | — | Source ids the query reads from. |
-| `language` | `string?` | `"cypher"` | `"gql"` selects GQL; **any other value (including typos) silently falls back to Cypher** (see [G10](#gap-analysis--tracked-follow-ups)). |
+| `language` | `string?` | `"cypher"` | `"gql"` selects GQL; `"cypher"` (or omitted) selects Cypher. **Any other value (including typos) is now rejected synchronously with a typed `UNKNOWN_QUERY_LANGUAGE` error** (audit gap G10, resolved). |
 | `joins` | `QueryJoin[]?` | — | `[{ id, keys: [{ label, property }] }]` synthetic joins relating elements across sources with no explicit relationship. |
 
 **Errors:** invalid `joins` JSON fails to deserialize; engine `add_query` errors
@@ -283,6 +341,34 @@ Add a JavaScript-defined reaction whose logic is a callback.
 > (gap G3): the Rust doc-comment previously described `callback` as an
 > *error-first* `(err, resultJson) => void`, which was incorrect. The callback is
 > value-only (`CalleeHandled = false`), and the doc-comment now says so.
+
+### `addDurableJsReaction(id, queryIds, callback, options?)` → `Promise<void>`
+
+Add a **durable, checkpointed** JavaScript reaction (audit gap G7).
+
+- `callback` is an **async** function `(result: QueryResultEvent) => Promise<void>`.
+  The reaction **awaits** its promise and then persists a per-query checkpoint, so
+  a restart resumes **after the last checkpointed sequence** — results that were
+  processed but not yet checkpointed when the process died are re-delivered. Empty
+  batches are skipped.
+- `options?: { recoveryPolicy?: 'skipGap' | 'strict' }` — how to recover on a
+  detected gap: `skipGap` (default) resumes from the latest available sequence;
+  `strict` fails if the checkpointed position is unavailable.
+
+**Durability semantics (important):** this is **crash recovery of not-yet-checkpointed
+results**, *not* per-event at-least-once. If the callback's promise rejects, the
+failure is logged and that result's checkpoint is not advanced, but processing
+continues with the **next** result; the callback is **not** retried in-process, and
+a later success for the same query advances the checkpoint past the failed
+sequence (so it is not retried on restart either). True per-event at-least-once
+(halt-on-error / bounded retry) is tracked in
+[#21](https://github.com/drasi-project/drasi-nodejs/issues/21).
+
+**Requires a durable state store** (`{ stateStore: { kind: 'redb', path } }`) —
+otherwise throws `DURABLE_REQUIRES_STATE_STORE` synchronously. Pair with a
+persistent `indexStore` (rocksdb, G6) so the reaction outbox is replayable across
+process restarts. Checkpoint progress is observable via `getReactionMetrics(id)`
+(`checkpointSequence`).
 
 ### `updateReaction(kind, id, queryIds, config)` → `Promise<void>`
 
@@ -456,10 +542,10 @@ Capabilities present in `drasi-server` but **missing or partial** in the binding
 | --- | --- |
 | Web UI + REST API | N/A by design — the JS API *is* the control surface (out of scope). |
 | Isolated "instances" | Each `Drasi.create()` is effectively one instance; no multi-instance manager. |
-| `--verify-plugins` cosign signature enforcement | ⚠️ Verification status surfaced (`pullPlugin.verification`) but **not enforced** — G5. |
-| Config-schema validation of source/reaction configs | ❌ Not validated; configs pass through as opaque JSON — G9. |
-| Persistence backends | Only `redb`; RocksDB index provider not wired — G6. |
-| Identity providers | ❌ Not exposed — G8. |
+| `--verify-plugins` cosign signature enforcement | ✅ Opt-in enforcement on `pullPlugin` (`{ verify, requireSigned }`) — tampered/unsigned artifacts are rejected and deleted (G5, resolved). |
+| Config-schema validation of source/reaction configs | ⚠️ Schema now exposed (`sourceConfigSchema`/`reactionConfigSchema`/`bootstrapConfigSchema`) + a `[CONFIG_INVALID]` message token on config rejection; full in-Rust JSON-schema enforcement deferred — G9 (partial). |
+| Persistence backends | ✅ redb state store + RocksDB index provider (`indexStore: { kind: 'rocksdb' }`) — G6. |
+| Identity providers | ✅ Built-in password/token providers via `identity: {…}` — G8. |
 
 Capabilities the bindings add beyond the server's config surface: **JS-defined
 sources** (`addJsSource`/`pushChange`) and **JS-defined reactions**
@@ -477,12 +563,12 @@ Each gap is mapped to an existing subtask of [team#85](https://github.com/drasi-
 | **G2** | ✅ **Resolved ([PR #5](https://github.com/drasi-project/drasi-nodejs/pull/5)).** Config/result params were typed `any`; now emitted as concrete `#[napi(object)]` interfaces so the generated `index.d.ts` is self-contained and `any`-free. The hand-written `types.d.ts` was removed. | High | [team#98](https://github.com/drasi-project/team/issues/98) |
 | **G3** | ✅ **Resolved ([PR #3](https://github.com/drasi-project/drasi-nodejs/pull/3)).** The `addJsReaction` doc-comment wrongly described an error-first `(err, resultJson)` callback; corrected to the actual value-only `(result) => void`. | Medium | [team#98](https://github.com/drasi-project/team/issues/98) |
 | **G4** | ⚠️ **Largely resolved ([PR #5](https://github.com/drasi-project/drasi-nodejs/pull/5)).** Typed error codes added: validation errors throw synchronously with a stable `err.code` from the exported `DrasiErrorCode` enum (async/engine errors still reject with `GenericFailure` and carry a `[CODE]` token in the message). **Remaining:** `ComponentStatus` from `list*` is still a debug-formatted string, not a typed enum. | High | [team#98](https://github.com/drasi-project/team/issues/98) |
-| **G5** | OCI `pullPlugin` surfaces a debug-formatted `verification` string but does not enforce cosign signatures / lockfiles. | High | [team#97](https://github.com/drasi-project/team/issues/97) |
-| **G6** | Only the `redb` state store is wired; no RocksDB index provider. | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
-| **G7** | JS reactions are not durable/checkpointed. | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
-| **G8** | No identity-provider surface. | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
-| **G9** | No declarative config-schema validation; source/reaction configs pass through as opaque JSON. | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
-| **G10** | `addQuery`/`updateQuery` `language` is not validated — any value other than `"gql"` silently becomes Cypher. | Low | [team#97](https://github.com/drasi-project/team/issues/97) |
+| **G5** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97)).** `pullPlugin` accepts `{ verify, requireSigned, trustedIdentities }` and **enforces** cosign verification via the host SDK's `CosignVerifier`: a `tampered`, untrusted-signer (or, with `requireSigned`, `unsigned`) artifact is deleted and the promise rejects with a `[PLUGIN_SIGNATURE_INVALID]` message token (async path; `err.code` stays `GenericFailure`). Trust is enforced in the binding via `matches_trusted_identity` (the SDK's `Verified` status alone does not check the signer). `verification` is now a structured object (`{ status, issuer?, subject?, reason? }`). | High | [team#97](https://github.com/drasi-project/team/issues/97) |
+| **G6** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97), #16).** A RocksDB persistent query-index backend is now wired via a new `indexStore: { kind: 'rocksdb', path, enableArchive?, directIo? }` option on `create`/`fromConfig` (`with_default_index_provider` + `drasi-index-rocksdb`), so element/result indexes and the reaction outbox persist across restarts. (Adds a bundled RocksDB C++ build — CI/release install libclang for bindgen.) | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
+| **G7** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97), #17).** `addDurableJsReaction(id, queryIds, asyncCallback, options?)` opts a JS reaction into the engine's checkpoint machinery: it awaits the callback's promise and persists a per-query checkpoint after each success, so a restart resumes after the last checkpointed sequence (crash recovery of not-yet-checkpointed results). Recovery policy (`skipGap`/`strict`) handles gaps. Requires a durable state store (`DURABLE_REQUIRES_STATE_STORE` otherwise); pair with `indexStore` (G6) for cross-process outbox replay. **Note:** a rejected callback is logged and **not** retried in-process, and a later success for the same query advances the checkpoint past it — so this is **not** per-event at-least-once; that is tracked in [#21](https://github.com/drasi-project/drasi-nodejs/issues/21). | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
+| **G8** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97), #20).** A built-in identity provider is wired via an `identity: { kind: 'password' \| 'token', … }` option on `create`/`fromConfig` (`with_identity_provider`), injecting credentials into sources/reactions that need them. Config is validated synchronously (`IDENTITY_KIND_REQUIRED`/`UNKNOWN_IDENTITY_KIND`/`IDENTITY_CONFIG_INVALID`). | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
+| **G9** | ⚠️ **Partially resolved ([team#97](https://github.com/drasi-project/team/issues/97)).** Each plugin kind's declared config schema is now exposed via `sourceConfigSchema`/`reactionConfigSchema`/`bootstrapConfigSchema` (from the descriptors' `config_schema_json()`), and a plugin's config rejection carries a stable `[CONFIG_INVALID]` token in the message (async path; `err.code` stays `GenericFailure`) instead of an untokened error. **Remaining:** full in-Rust JSON-schema enforcement is deferred — the utoipa/OpenAPI dialect risks false-positive rejections of currently-valid configs; callers can validate against the exposed schema (e.g. ajv). | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
+| **G10** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97)).** `addQuery`/`updateQuery`/`fromConfig` now reject any `language` other than `"cypher"`/`"gql"` (or omitted) with a typed synchronous `UNKNOWN_QUERY_LANGUAGE` error instead of silently defaulting to Cypher. | Low | [team#97](https://github.com/drasi-project/team/issues/97) |
 | **G11** | ✅ **Resolved.** `README.md`'s API overview now includes the metrics methods and `Drasi.fromConfig`, and links this reference. | Low | this PR |
 | **G12** | ✅ **Resolved ([PR #6](https://github.com/drasi-project/drasi-nodejs/pull/6)).** Added Rust unit tests for the pure logic + a `cargo llvm-cov` line-coverage gate (scoped to `conversions.rs`/`error.rs`, floor 90%, measured ~95%), plus expanded error/edge and leak/soak integration tests (suite now 44 passing). | High | [team#99](https://github.com/drasi-project/team/issues/99) |
 | **G13** | ✅ **#93/#94 resolved ([PR #4](https://github.com/drasi-project/drasi-nodejs/pull/4)).** Cross-platform prebuild matrix + tag-triggered npm publish pipeline (provenance; Linux glibc floor 2.35). **#95** (first publish) is prepared with a human checklist in `docs/releasing.md` and remains gated on npm scope access + credentials. | Blocker for release | [team#93](https://github.com/drasi-project/team/issues/93), [team#94](https://github.com/drasi-project/team/issues/94), [team#95](https://github.com/drasi-project/team/issues/95) |
@@ -492,14 +578,15 @@ Each gap is mapped to an existing subtask of [team#85](https://github.com/drasi-
 
 Resolved since the original audit: **G1, G3** ([PR #3](https://github.com/drasi-project/drasi-nodejs/pull/3)),
 **G2** ([PR #5](https://github.com/drasi-project/drasi-nodejs/pull/5)),
-**G12** ([PR #6](https://github.com/drasi-project/drasi-nodejs/pull/6)), and **G11**
-(this PR). **G4** is largely resolved ([PR #5](https://github.com/drasi-project/drasi-nodejs/pull/5))
-apart from typing `ComponentStatus`, and **G13**'s pipeline is in place
+**G12** ([PR #6](https://github.com/drasi-project/drasi-nodejs/pull/6)), **G11**,
+and **G5, G6, G7, G8, G10** plus a partial **G9** (team#97). **G4** is largely
+resolved ([PR #5](https://github.com/drasi-project/drasi-nodejs/pull/5)) apart from
+typing `ComponentStatus`, and **G13**'s pipeline is in place
 ([PR #4](https://github.com/drasi-project/drasi-nodejs/pull/4)) with the first
 publish (**#95**) gated on human credentials.
 
 Remaining:
 
-1. Engine-feature gaps **G5–G10** ([team#97](https://github.com/drasi-project/team/issues/97)) — cosign enforcement, RocksDB, durable JS reactions, identity providers, config-schema validation, `language` validation.
+1. **G9** full in-Rust JSON-schema enforcement (beyond the exposed schema + typed `CONFIG_INVALID`).
 2. Community/governance files **G14** ([team#100](https://github.com/drasi-project/team/issues/100)).
 3. First stable npm publish **#95** — human-gated; checklist in `docs/releasing.md`.

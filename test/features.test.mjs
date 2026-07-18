@@ -8,8 +8,9 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, existsSync, mkdtempSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 
 const require = createRequire(import.meta.url);
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -65,8 +66,196 @@ test('metrics accessors return numeric snapshots', async () => {
   await d.close();
 });
 
-// Network tests against the public ghcr.io/drasi-project registry. Skipped by
-// default so offline `npm test` passes; run with DRASI_OCI_TESTS=1.
+// Config-schema exposure + typed config errors (gap G9).
+test('config schema accessors expose a plugin kind\'s declared schema', async () => {
+  const d = await Drasi.create('t-schema');
+  await d.loadPlugins(pluginsDir);
+
+  const src = d.sourceConfigSchema('mock');
+  assert.equal(src.name, 'source.mock.MockSourceConfig', 'root config DTO name');
+  assert.equal(typeof src.schema, 'object', 'schema is an object map');
+  assert.ok(src.schema[src.name], 'schema map contains the root config DTO');
+
+  const rxn = d.reactionConfigSchema('log');
+  assert.equal(typeof rxn.name, 'string', 'reaction schema has a name');
+  assert.ok(rxn.schema && rxn.schema[rxn.name], 'reaction schema map contains its root');
+
+  await d.close();
+});
+
+test('config schema accessors throw a typed error for unknown kinds', async () => {
+  const d = await Drasi.create('t-schema-unknown');
+  await d.loadPlugins(pluginsDir);
+  const cases = [
+    [() => d.sourceConfigSchema('nope'), 'UNKNOWN_SOURCE_KIND'],
+    [() => d.reactionConfigSchema('nope'), 'UNKNOWN_REACTION_KIND'],
+    [() => d.bootstrapConfigSchema('nope'), 'UNKNOWN_BOOTSTRAP_KIND'],
+  ];
+  for (const [fn, code] of cases) {
+    assert.throws(fn, (err) => {
+      assert.equal(err.code, code, `expected ${code}, got ${err.code}`);
+      return true;
+    });
+  }
+  await d.close();
+});
+
+test('an invalid source config is rejected with the [CONFIG_INVALID] token', async () => {
+  const d = await Drasi.create('t-config-invalid');
+  await d.loadPlugins(pluginsDir);
+  await d.start();
+  // The mock DTO uses deny_unknown_fields, so an unknown field fails to deserialize.
+  await assert.rejects(
+    async () => d.addSource('mock', 'src', { bogusField: true }),
+    (err) => {
+      assert.match(err.message, /\[CONFIG_INVALID\]/);
+      return true;
+    },
+  );
+  await d.close();
+});
+
+// ---------------------------------------------------------------------------
+// Persistence, identity, and durable reactions (gaps G6, G8, G7)
+// ---------------------------------------------------------------------------
+
+const waitUntil = async (fn, { timeout = 5000, interval = 50 } = {}) => {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      if (await fn()) return true;
+    } catch {
+      // Ignore transient errors (e.g. querying before it finishes auto-starting)
+      // and keep polling until the timeout.
+    }
+    await sleep(interval);
+  }
+  return false;
+};
+
+// G6: a RocksDB persistent index backend is wired and query results flow through it.
+test('engine runs with a rocksdb index backend', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-rocks-'));
+  const d = await Drasi.create('t-rocks', { indexStore: { kind: 'rocksdb', path: join(dir, 'idx') } });
+  await d.start();
+  await d.addJsSource('g');
+  await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+  await d.pushChange('g', { op: 'insert', id: 't1', labels: ['Thing'], properties: { name: 'alice' } });
+  const ok = await waitUntil(async () => (await d.getQueryResults('q')).some((r) => r.name === 'alice'));
+  assert.ok(ok, 'query backed by rocksdb produced results');
+  await d.close();
+});
+
+// G6: query index state persists across a full engine restart. A rocksdb
+// indexStore holds a process-exclusive lock (released on process exit, not on
+// `close()`), so a genuine restart is a NEW process — this test runs the write and
+// the read in separate child processes sharing the same index path, and the read
+// process must recover the prior result WITHOUT re-pushing any source data.
+test('rocksdb index state persists across an engine restart (separate processes)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-rocks-persist-'));
+  const idxPath = join(dir, 'idx');
+  const addon = join(root, 'index.js');
+
+  // A tiny driver run in a child process: opens a rocksdb-backed engine at the
+  // given path, (optionally) pushes one node, and prints whether the query holds
+  // it. Written to a temp file so `node --test` doesn't pick it up as a test.
+  const helper = join(dir, 'persist-child.mjs');
+  writeFileSync(
+    helper,
+    `import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const [,, addonPath, mode, path] = process.argv;
+const { Drasi } = require(addonPath);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitUntil = async (fn, t = 4000) => {
+  const s = Date.now();
+  while (Date.now() - s < t) { try { if (await fn()) return true; } catch {} await sleep(50); }
+  return false;
+};
+const d = await Drasi.create('persist', { indexStore: { kind: 'rocksdb', path } });
+await d.start();
+await d.addJsSource('g');
+await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+if (mode === 'write') {
+  await d.pushChange('g', { op: 'insert', id: 't1', labels: ['Thing'], properties: { name: 'alice' } });
+}
+const ok = await waitUntil(async () => (await d.getQueryResults('q')).some((r) => r.name === 'alice'));
+process.stdout.write('RESULT=' + (ok ? 'true' : 'false'));
+await d.close();
+`,
+  );
+
+  const run = (mode) =>
+    execFileSync('node', [helper, addon, mode, idxPath], {
+      cwd: root,
+      env: { ...process.env, RUST_LOG: 'error' },
+      encoding: 'utf8',
+    });
+
+  // Process 1 writes and checkpoints the result to the rocksdb index, then exits
+  // (releasing the lock).
+  assert.match(run('write'), /RESULT=true/, 'write process computed the result');
+  // Process 2 opens the SAME index path and, without pushing anything, recovers
+  // the prior result from disk.
+  assert.match(run('read'), /RESULT=true/, 'restart process recovered the persisted result without re-pushing');
+});
+
+// G8: a built-in password identity provider is accepted and the engine runs.
+test('engine builds with a password identity provider', async () => {
+  const d = await Drasi.create('t-identity', { identity: { kind: 'password', username: 'u', password: 'p' } });
+  await d.start();
+  await d.addJsSource('g');
+  await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+  await d.pushChange('g', { op: 'insert', id: 't1', labels: ['Thing'], properties: { name: 'bob' } });
+  const ok = await waitUntil(async () => (await d.getQueryResults('q')).some((r) => r.name === 'bob'));
+  assert.ok(ok, 'engine with an identity provider runs queries');
+  await d.close();
+});
+
+// G7: a durable reaction requires a durable state store (typed synchronous error).
+test('addDurableJsReaction without a state store throws DURABLE_REQUIRES_STATE_STORE', async () => {
+  const d = await Drasi.create('t-durable-nostore');
+  await d.start();
+  await d.addJsSource('g');
+  await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+  await assert.rejects(
+    async () => d.addDurableJsReaction('r', ['q'], async () => {}),
+    (err) => {
+      assert.equal(err.code, 'DURABLE_REQUIRES_STATE_STORE', `got ${err.code}`);
+      return true;
+    },
+  );
+  await d.close();
+});
+
+// G7: a durable reaction delivers results (awaiting the async callback) and
+// advances its persisted checkpoint.
+test('durable JS reaction delivers results and advances its checkpoint', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-durable-'));
+  const d = await Drasi.create('t-durable', {
+    stateStore: { kind: 'redb', path: join(dir, 'state.redb') },
+    indexStore: { kind: 'rocksdb', path: join(dir, 'idx') },
+  });
+  await d.start();
+  await d.addJsSource('g');
+  await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+  const seen = [];
+  await d.addDurableJsReaction('r', ['q'], async (result) => {
+    for (const diff of result.results) {
+      if (diff.data && diff.data.name) seen.push(diff.data.name);
+    }
+  });
+  await d.pushChange('g', { op: 'insert', id: 't1', labels: ['Thing'], properties: { name: 'carol' } });
+  const delivered = await waitUntil(() => seen.includes('carol'));
+  assert.ok(delivered, 'durable reaction received the result via its async callback');
+  // The checkpoint advanced for query q (proves durable checkpointing ran).
+  const advanced = await waitUntil(async () => {
+    const m = await d.getReactionMetrics('r');
+    return m.q && m.q.checkpointSequence >= 1;
+  });
+  assert.ok(advanced, 'durable reaction advanced its persisted checkpoint');
+  await d.close();
+});
 const ociSkip = process.env.DRASI_OCI_TESTS ? false : 'set DRASI_OCI_TESTS=1 to run OCI registry tests';
 
 test('OCI: list plugin tags from the public registry', { skip: ociSkip }, async () => {
@@ -96,11 +285,20 @@ test('OCI: pull a plugin artifact to disk', { skip: ociSkip }, async () => {
   const ext = process.platform === 'win32' ? 'dll' : process.platform === 'darwin' ? 'dylib' : 'so';
   const prefix = process.platform === 'win32' ? '' : 'lib';
   const filename = `${prefix}drasi_source_postgres.${ext}`;
-  const result = await d.pullPlugin(
-    `ghcr.io/drasi-project/source/postgres:${match}`,
-    dest,
-    filename,
-  );
+  const reference = `ghcr.io/drasi-project/source/postgres:${match}`;
+
+  // Default (no options): downloads and reports an unenforced verification status.
+  const result = await d.pullPlugin(reference, dest, filename);
   assert.ok(existsSync(result.path), `downloaded plugin exists at ${result.path}`);
+  assert.equal(result.verification.status, 'unsigned', 'no verification requested');
+
+  // With verification enabled the status is a structured, known value (gap G5).
+  const verified = await d.pullPlugin(reference, dest, filename, { verify: true });
+  assert.ok(
+    ['unsigned', 'verified', 'tampered'].includes(verified.verification.status),
+    `structured verification status, got ${verified.verification.status}`,
+  );
+  // A legitimate drasi-project artifact must never verify as tampered.
+  assert.notEqual(verified.verification.status, 'tampered', 'genuine artifact is not tampered');
   await d.close();
 });

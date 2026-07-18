@@ -361,6 +361,33 @@ test('validation errors expose stable typed err.code values', async () => {
     /stateStore\.path is required/,
   );
 
+  // Index-store validation (gap G6).
+  await expectCode(
+    () => Drasi.create('t-is1', { indexStore: { kind: 'bogus', path: '/tmp/x' } }),
+    'UNKNOWN_INDEX_STORE_KIND',
+    /unknown indexStore kind 'bogus'/,
+  );
+  await expectCode(
+    () => Drasi.create('t-is2', { indexStore: { kind: 'rocksdb' } }),
+    'INDEX_STORE_PATH_REQUIRED',
+    /indexStore\.path is required/,
+  );
+
+  // Identity-provider validation (gap G8).
+  await expectCode(
+    () => Drasi.create('t-id1', { identity: { username: 'u' } }),
+    'IDENTITY_KIND_REQUIRED',
+  );
+  await expectCode(
+    () => Drasi.create('t-id2', { identity: { kind: 'bogus' } }),
+    'UNKNOWN_IDENTITY_KIND',
+  );
+  await expectCode(
+    () => Drasi.create('t-id3', { identity: { kind: 'password', username: 'u' } }),
+    'IDENTITY_CONFIG_INVALID',
+    /password is required/,
+  );
+
   const d = await Drasi.create('t-codes');
 
   // Source / reaction kind lookups.

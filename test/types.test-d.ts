@@ -10,10 +10,13 @@ import type {
   ComponentStatusEntry,
   CreateOptions,
   DrasiConfig,
+  DurableReactionOptions,
   LifecycleMetrics,
   LoadPluginsResult,
   LogMessage,
+  PluginConfigSchema,
   PluginKinds,
+  PullPluginOptions,
   PullPluginResult,
   QueryJoin,
   QueryMetrics,
@@ -28,6 +31,8 @@ async function construction(): Promise<void> {
   const opts: CreateOptions = {
     secrets: { API_KEY: 'shh' },
     stateStore: { kind: 'redb', path: '/tmp/state.redb' },
+    indexStore: { kind: 'rocksdb', path: '/tmp/idx', enableArchive: false, directIo: false },
+    identity: { kind: 'password', username: 'u', password: 'p' },
   }
   const d: Drasi = await Drasi.create('app', opts)
 
@@ -35,6 +40,8 @@ async function construction(): Promise<void> {
     id: 'app',
     secrets: { API_KEY: 'shh' },
     stateStore: { kind: 'redb', path: '/tmp/s.redb' },
+    indexStore: { kind: 'rocksdb', path: '/tmp/idx2' },
+    identity: { kind: 'token', token: 'abc' },
     pluginsDir: './plugins',
     sources: [
       {
@@ -64,7 +71,26 @@ async function plugins(d: Drasi): Promise<void> {
   void tags
   const pulled: PullPluginResult = await d.pullPlugin('ref:tag', './plugins', 'x.so')
   void pulled.path
-  void pulled.verification
+  // `verification` is a structured object (gap G5), not a debug string.
+  const status: 'unsigned' | 'verified' | 'tampered' = pulled.verification.status
+  void status
+  const issuer: string | undefined = pulled.verification.issuer
+  void issuer
+  // Opt-in verification options.
+  const opts: PullPluginOptions = {
+    verify: true,
+    requireSigned: false,
+    trustedIdentities: [{ issuer: 'https://x', subjectPattern: 'https://github.com/drasi-project/*' }],
+  }
+  const verified: PullPluginResult = await d.pullPlugin('ref:tag', './plugins', 'x.so', opts)
+  void verified.verification.reason
+  // Config-schema accessors (gap G9).
+  const srcSchema: PluginConfigSchema = d.sourceConfigSchema('mock')
+  void `${srcSchema.name}:${typeof srcSchema.schema}`
+  const rxnSchema: PluginConfigSchema = d.reactionConfigSchema('log')
+  void rxnSchema.name
+  const bsSchema: PluginConfigSchema = d.bootstrapConfigSchema('bs')
+  void bsSchema.name
 }
 
 async function sources(d: Drasi): Promise<void> {
@@ -112,6 +138,16 @@ async function reactions(d: Drasi): Promise<void> {
     void seq
     void result.metadata
   })
+  // Durable reaction: async callback returning a promise (gap G7).
+  const durableOpts: DurableReactionOptions = { recoveryPolicy: 'skipGap' }
+  await d.addDurableJsReaction(
+    'js-durable',
+    ['q'],
+    async (result: QueryResultEvent): Promise<void> => {
+      void result.sequence
+    },
+    durableOpts,
+  )
   await d.updateReaction('log', 'r', ['q'], {})
   const list: ComponentStatusEntry[] = await d.listReactions()
   void list

@@ -29,6 +29,17 @@ jobs:
       - name: Checkout drasi-nodejs
         uses: actions/checkout@v4
 
+      # RocksDB (via librocksdb-sys) compiles a bundled C++ library and runs
+      # bindgen, which needs libclang. macOS ships it with the Command Line Tools;
+      # Linux needs the dev package and Windows needs LLVM on LIBCLANG_PATH.
+      - name: Install libclang for rocksdb bindgen (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - name: Point bindgen at LLVM (Windows)
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+        shell: pwsh
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -75,6 +86,9 @@ jobs:
     steps:
       - name: Checkout drasi-nodejs
         uses: actions/checkout@v4
+
+      - name: Install libclang for rocksdb bindgen
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:

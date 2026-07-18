@@ -24,15 +24,19 @@ use drasi_host_sdk::loader::{PluginLoader, PluginLoaderConfig};
 use drasi_host_sdk::plugin_types::PluginFileEvent;
 use drasi_host_sdk::watcher::{PluginWatcher, PluginWatcherConfig};
 use drasi_lib::secret_store::SecretStoreProvider;
+use drasi_lib::identity::{
+    ApplicationIdentityProvider, Credentials, IdentityProvider, PasswordIdentityProvider,
+};
 use drasi_lib::{DrasiLib, MemorySecretStoreProvider, Query};
 use drasi_plugin_sdk::{
     BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
 };
 
-use crate::components::{JsReaction, JsResultFn, JsSource};
-use crate::conversions::json_to_source_change;
+use crate::components::{JsDurableResultFn, JsReaction, JsResultFn, JsSource};
+use crate::conversions::{json_to_source_change, plugin_config_schema, resolve_query_language};
 use crate::error::{coded_message, throw_coded, to_napi, DrasiErrorCode};
 use crate::secrets::{build_config_resolver_context, config_resolver_callback, ConfigResolverContext};
+use crate::verification::{verification_decision, verification_to_json};
 
 /// File patterns for discovering cdylib plugins (Unix + Windows naming).
 const PLUGIN_FILE_PATTERNS: &[&str] = &[
@@ -73,6 +77,9 @@ struct Inner {
     secret_provider: Arc<dyn SecretStoreProvider>,
     /// This engine instance's id, used when lazily building the callback context.
     instance_id: String,
+    /// Whether a durable (disk-backed) state store is configured — required for
+    /// durable JS reactions (audit gap G7).
+    has_durable_state_store: bool,
     /// Leaked `ConfigResolverContext` pointer (process-lifetime) injected into
     /// plugins so they can resolve `ConfigValue::Secret`/`EnvironmentVariable`.
     ///
@@ -181,8 +188,19 @@ impl Drasi {
         // Validate the optional persistent state store synchronously so callers
         // get a typed `err.code`, e.g. { stateStore: { kind: 'redb', path: '...' } }.
         let state_path = parse_state_store(env, options.as_ref())?;
+        // Optional RocksDB persistent query-index backend (gap G6) and identity
+        // provider (gap G8) — both validated synchronously for typed errors.
+        let index_store = parse_index_store(env, options.as_ref())?;
+        let identity = parse_identity(env, options.as_ref())?;
 
-        env.spawn_future(async move { build_engine(id, provider, state_path).await })
+        env.spawn_future(async move {
+            build_engine(
+                id,
+                provider,
+                EngineParams { state_path, index_store, identity },
+            )
+            .await
+        })
     }
 
     /// Build and start an engine from a declarative config object:
@@ -216,6 +234,8 @@ impl Drasi {
         }
         let provider: Arc<dyn SecretStoreProvider> = Arc::new(store);
         let state_path = parse_state_store(env, Some(&config))?;
+        let index_store = parse_index_store(env, Some(&config))?;
+        let identity = parse_identity(env, Some(&config))?;
 
         // Validate required fields synchronously so callers get a typed `err.code`.
         let arr = |key: &str| -> Vec<Value> {
@@ -263,6 +283,10 @@ impl Drasi {
             let text = req_str(&q, "query")?;
             let srcs = str_vec(&q, "sources");
             let language = q.get("language").and_then(|v| v.as_str()).map(String::from);
+            // Validate the language synchronously so a typo throws a typed
+            // `err.code` up front instead of silently becoming Cypher (gap G10).
+            resolve_query_language(language.as_deref())
+                .map_err(|r| throw_coded(env, r.code, r.message))?;
             let joins = q.get("joins").cloned();
             queries.push((qid, text, srcs, language, joins));
         }
@@ -277,7 +301,12 @@ impl Drasi {
         let plugins_dir = config.get("pluginsDir").and_then(|v| v.as_str()).map(String::from);
 
         env.spawn_future(async move {
-            let drasi = build_engine(id, provider, state_path).await?;
+            let drasi = build_engine(
+                id,
+                provider,
+                EngineParams { state_path, index_store, identity },
+            )
+            .await?;
 
             if let Some(dir) = plugins_dir {
                 drasi.load_plugins(dir, None).await?;
@@ -289,7 +318,9 @@ impl Drasi {
                     .await?;
             }
             for (qid, text, srcs, language, joins) in queries {
-                drasi.add_query(qid, text, srcs, language, joins).await?;
+                let is_gql = language.as_deref() == Some("gql");
+                let def = build_query_def(qid, text, srcs, is_gql, joins)?;
+                drasi.inner.drasi.add_query(def).await.map_err(to_napi)?;
             }
             for (kind, rid, qs, cfg) in reactions {
                 add_reaction_full(drasi.inner.clone(), kind, rid, qs, cfg).await?;
@@ -391,24 +422,97 @@ impl Drasi {
     ///
     /// `reference` is a full OCI reference, e.g.
     /// `"ghcr.io/drasi-project/source/postgres:0.1.13-windows-msvc-amd64"`.
+    ///
+    /// Cosign verification is opt-in via `options` (audit gap G5). With none (or
+    /// `verify: false`) the artifact is downloaded and `verification.status` is
+    /// `"unsigned"`. When `verify` is set, the signature is checked and its status
+    /// surfaced; a `"tampered"` artifact is always rejected — its file is removed
+    /// and the promise rejects with `PLUGIN_SIGNATURE_INVALID`. With `requireSigned`
+    /// an `"unsigned"` artifact is likewise rejected.
+    ///
     /// Returns `{ path, verification }`. After pulling, call `loadPlugins(destDir)`
     /// (or `watchPlugins`) to register it.
-    #[napi(ts_return_type = "Promise<PullPluginResult>")]
+    #[napi(
+        ts_args_type = "reference: string, destDir: string, filename: string, options?: PullPluginOptions",
+        ts_return_type = "Promise<PullPluginResult>"
+    )]
     pub async fn pull_plugin(
         &self,
         reference: String,
         dest_dir: String,
         filename: String,
+        options: Option<Value>,
     ) -> napi::Result<Value> {
-        use drasi_host_sdk::registry::{OciRegistryClient, RegistryConfig};
-        let client = OciRegistryClient::new(RegistryConfig::default());
+        use drasi_host_sdk::registry::{
+            CosignVerifier, OciRegistryClient, RegistryConfig, TrustedIdentity, VerificationConfig,
+        };
+
+        // Parse opt-in verification options. `requireSigned` implies verification.
+        let opts = options.as_ref();
+        let require_signed = opts
+            .and_then(|o| o.get("requireSigned"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let verify = require_signed
+            || opts
+                .and_then(|o| o.get("verify"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        let trusted_identities: Vec<TrustedIdentity> = opts
+            .and_then(|o| o.get("trustedIdentities"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        let issuer = t.get("issuer").and_then(|v| v.as_str())?;
+                        let subject = t.get("subjectPattern").and_then(|v| v.as_str())?;
+                        Some(TrustedIdentity {
+                            issuer: issuer.to_string(),
+                            subject_pattern: subject.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let config = VerificationConfig {
+            enabled: verify,
+            trusted_identities,
+        };
+        // The effective allowlist (falls back to the drasi-project identity when
+        // the caller configures none) — enforced by the binding since the SDK's
+        // `Verified` status does not itself check the signer against any allowlist.
+        let effective_identities = config.effective_identities();
+        let verifier = CosignVerifier::new(config);
+        let client = OciRegistryClient::with_verifier(RegistryConfig::default(), verifier);
         let result = client
             .download_plugin(&reference, std::path::Path::new(&dest_dir), &filename)
             .await
             .map_err(to_napi)?;
+
+        // Enforce the verification policy when verification is enabled: a tampered,
+        // untrusted-signer (or, with requireSigned, unsigned) artifact is deleted
+        // and rejected.
+        if verify {
+            if let Err(reason) =
+                verification_decision(&result.verification, require_signed, &effective_identities)
+            {
+                // Best-effort removal of the rejected artifact; if it fails, tell the
+                // caller so they don't assume a rejected file was cleaned up.
+                let reason = match tokio::fs::remove_file(&result.path).await {
+                    Ok(()) => reason,
+                    Err(e) => format!(
+                        "{reason} (warning: failed to remove the downloaded artifact at {}: {e})",
+                        result.path.display()
+                    ),
+                };
+                return Err(coded_message(DrasiErrorCode::PluginSignatureInvalid, reason));
+            }
+        }
+
         Ok(serde_json::json!({
             "path": result.path.to_string_lossy().to_string(),
-            "verification": format!("{:?}", result.verification),
+            "verification": verification_to_json(&result.verification),
         }))
     }
 
@@ -425,6 +529,54 @@ impl Drasi {
             "reactions": reactions,
             "bootstrap": bootstrap,
         })
+    }
+
+    /// Return the config schema advertised by a registered **source** plugin kind
+    /// as `{ name, schema }` (audit gap G9). `name` is the root config DTO key
+    /// within `schema`, an object of OpenAPI (utoipa) schema definitions. Throws a
+    /// typed `UNKNOWN_SOURCE_KIND` error if the kind is not registered.
+    ///
+    /// Config is still marshaled as opaque JSON at runtime; this exposes the
+    /// plugin's declared schema so callers can validate config (e.g. with ajv)
+    /// before `addSource`. Malformed config is also surfaced as a typed
+    /// `CONFIG_INVALID` error from `addSource`/`updateSource`.
+    #[napi(ts_return_type = "PluginConfigSchema")]
+    pub fn source_config_schema(&self, env: &Env, kind: String) -> napi::Result<Value> {
+        let descriptor = { self.inner.sources.lock().unwrap().get(&kind).cloned() }.ok_or_else(
+            || throw_coded(env, DrasiErrorCode::UnknownSourceKind, format!("unknown source kind '{kind}'")),
+        )?;
+        Ok(plugin_config_schema(
+            descriptor.config_schema_name(),
+            &descriptor.config_schema_json(),
+        ))
+    }
+
+    /// Return the config schema advertised by a registered **reaction** plugin
+    /// kind as `{ name, schema }` (audit gap G9). Throws a typed
+    /// `UNKNOWN_REACTION_KIND` error if the kind is not registered.
+    #[napi(ts_return_type = "PluginConfigSchema")]
+    pub fn reaction_config_schema(&self, env: &Env, kind: String) -> napi::Result<Value> {
+        let descriptor = { self.inner.reactions.lock().unwrap().get(&kind).cloned() }.ok_or_else(
+            || throw_coded(env, DrasiErrorCode::UnknownReactionKind, format!("unknown reaction kind '{kind}'")),
+        )?;
+        Ok(plugin_config_schema(
+            descriptor.config_schema_name(),
+            &descriptor.config_schema_json(),
+        ))
+    }
+
+    /// Return the config schema advertised by a registered **bootstrap** plugin
+    /// kind as `{ name, schema }` (audit gap G9). Throws a typed
+    /// `UNKNOWN_BOOTSTRAP_KIND` error if the kind is not registered.
+    #[napi(ts_return_type = "PluginConfigSchema")]
+    pub fn bootstrap_config_schema(&self, env: &Env, kind: String) -> napi::Result<Value> {
+        let descriptor = { self.inner.bootstrap.lock().unwrap().get(&kind).cloned() }.ok_or_else(
+            || throw_coded(env, DrasiErrorCode::UnknownBootstrapKind, format!("unknown bootstrap kind '{kind}'")),
+        )?;
+        Ok(plugin_config_schema(
+            descriptor.config_schema_name(),
+            &descriptor.config_schema_json(),
+        ))
     }
 
     // ------------------------------------------------------------------
@@ -573,7 +725,7 @@ impl Drasi {
             let source = descriptor
                 .create_source(&id, &config, auto_start.unwrap_or(true))
                 .await
-                .map_err(to_napi)?;
+                .map_err(|e| coded_message(DrasiErrorCode::ConfigInvalid, e.to_string()))?;
             inner.drasi.update_source(&id, source).await.map_err(to_napi)
         })
     }
@@ -606,33 +758,30 @@ impl Drasi {
     /// `language` is `"cypher"` (default) or `"gql"`. `joins` is an optional array of
     /// synthetic join definitions (`[{ id, keys: [{ label, property }] }]`) used to
     /// relate elements across sources that have no explicit relationship.
+    ///
+    /// `language` is validated synchronously (a value other than `"cypher"`/`"gql"`
+    /// throws a typed `err.code`); building and registering the query resolves
+    /// asynchronously.
     #[napi(
-        ts_args_type = "id: string, query: string, sources: Array<string>, language?: 'cypher' | 'gql', joins?: QueryJoin[]"
+        ts_args_type = "id: string, query: string, sources: Array<string>, language?: 'cypher' | 'gql', joins?: QueryJoin[]",
+        ts_return_type = "Promise<void>"
     )]
-    pub async fn add_query(
+    pub fn add_query<'a>(
         &self,
+        env: &'a Env,
         id: String,
         query: String,
         sources: Vec<String>,
         language: Option<String>,
         joins: Option<Value>,
-    ) -> napi::Result<()> {
-        let mut builder = match language.as_deref() {
-            Some("gql") => Query::gql(id),
-            _ => Query::cypher(id),
-        };
-        builder = builder.query(query);
-        for source in sources {
-            builder = builder.from_source(source);
-        }
-        if let Some(joins) = joins {
-            builder = builder.with_joins(parse_joins(joins)?);
-        }
-        self.inner
-            .drasi
-            .add_query(builder.build())
-            .await
-            .map_err(to_napi)
+    ) -> napi::Result<PromiseRaw<'a, ()>> {
+        let is_gql = resolve_query_language(language.as_deref())
+            .map_err(|r| throw_coded(env, r.code, r.message))?;
+        let inner = self.inner.clone();
+        env.spawn_future(async move {
+            let def = build_query_def(id, query, sources, is_gql, joins)?;
+            inner.drasi.add_query(def).await.map_err(to_napi)
+        })
     }
 
     /// Remove a query by id.
@@ -644,33 +793,28 @@ impl Drasi {
     /// Replace a query's definition in place (same id).
     ///
     /// `joins` matches `addQuery`: an optional array of synthetic join definitions.
+    /// `language` is validated synchronously (typed `err.code`); the replacement
+    /// resolves asynchronously.
     #[napi(
-        ts_args_type = "id: string, query: string, sources: Array<string>, language?: 'cypher' | 'gql', joins?: QueryJoin[]"
+        ts_args_type = "id: string, query: string, sources: Array<string>, language?: 'cypher' | 'gql', joins?: QueryJoin[]",
+        ts_return_type = "Promise<void>"
     )]
-    pub async fn update_query(
+    pub fn update_query<'a>(
         &self,
+        env: &'a Env,
         id: String,
         query: String,
         sources: Vec<String>,
         language: Option<String>,
         joins: Option<Value>,
-    ) -> napi::Result<()> {
-        let mut builder = match language.as_deref() {
-            Some("gql") => Query::gql(id.clone()),
-            _ => Query::cypher(id.clone()),
-        };
-        builder = builder.query(query);
-        for source in sources {
-            builder = builder.from_source(source);
-        }
-        if let Some(joins) = joins {
-            builder = builder.with_joins(parse_joins(joins)?);
-        }
-        self.inner
-            .drasi
-            .update_query(&id, builder.build())
-            .await
-            .map_err(to_napi)
+    ) -> napi::Result<PromiseRaw<'a, ()>> {
+        let is_gql = resolve_query_language(language.as_deref())
+            .map_err(|r| throw_coded(env, r.code, r.message))?;
+        let inner = self.inner.clone();
+        env.spawn_future(async move {
+            let def = build_query_def(id.clone(), query, sources, is_gql, joins)?;
+            inner.drasi.update_query(&id, def).await.map_err(to_napi)
+        })
     }
 
     /// Start a query by id.
@@ -754,6 +898,69 @@ impl Drasi {
             .map_err(to_napi)
     }
 
+    /// Add a **durable** JavaScript-defined reaction (audit gap G7).
+    ///
+    /// Unlike [`add_js_reaction`](Self::add_js_reaction), `callback` must be an
+    /// async function `(result) => Promise<void>`; the reaction awaits its promise
+    /// and persists a per-query checkpoint after each successfully processed
+    /// result. On restart it resumes **after the last checkpointed sequence**, so
+    /// results that were processed-but-not-yet-checkpointed when the process died
+    /// are re-delivered — i.e. durability here is **crash recovery of
+    /// not-yet-checkpointed results**, not per-event at-least-once.
+    ///
+    /// If the promise rejects, the failure is logged and that result's checkpoint
+    /// is not advanced, but processing continues with the next result; the callback
+    /// is **not** retried in-process, and a later success for the same query
+    /// advances the checkpoint past the failed sequence (so it is not retried on
+    /// restart either). See #21 for tracking true per-event at-least-once
+    /// (halt-on-error / bounded retry).
+    ///
+    /// Requires a durable state store (`{ stateStore: { kind: 'redb', path } }`) —
+    /// validated synchronously with `DURABLE_REQUIRES_STATE_STORE`. Pair with a
+    /// persistent `indexStore` (rocksdb) for cross-process outbox replay.
+    ///
+    /// `options.recoveryPolicy` is `"skipGap"` (default) or `"strict"`.
+    #[napi(
+        ts_args_type = "id: string, queryIds: Array<string>, callback: (result: QueryResultEvent) => Promise<void>, options?: DurableReactionOptions",
+        ts_return_type = "Promise<void>"
+    )]
+    pub fn add_durable_js_reaction<'a>(
+        &self,
+        env: &'a Env,
+        id: String,
+        query_ids: Vec<String>,
+        callback: JsDurableResultFn,
+        options: Option<Value>,
+    ) -> napi::Result<PromiseRaw<'a, ()>> {
+        if !self.inner.has_durable_state_store {
+            return Err(throw_coded(
+                env,
+                DrasiErrorCode::DurableRequiresStateStore,
+                "durable reactions require a durable state store — create the engine with { stateStore: { kind: 'redb', path } }",
+            ));
+        }
+        let policy = match options
+            .as_ref()
+            .and_then(|o| o.get("recoveryPolicy"))
+            .and_then(|v| v.as_str())
+        {
+            Some("strict") => drasi_lib::recovery::ReactionRecoveryPolicy::Strict,
+            _ => drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap,
+        };
+        let inner = self.inner.clone();
+        env.spawn_future(async move {
+            let reaction = JsReaction::new_durable(id, query_ids, callback, policy);
+            let mut meta = HashMap::new();
+            meta.insert("kind".to_string(), "js-callback".to_string());
+            meta.insert("durable".to_string(), "true".to_string());
+            inner
+                .drasi
+                .add_reaction_with_metadata(reaction, meta)
+                .await
+                .map_err(to_napi)
+        })
+    }
+
     /// Remove a reaction by id.
     #[napi]
     pub async fn remove_reaction(&self, id: String, cleanup: Option<bool>) -> napi::Result<()> {
@@ -785,7 +992,7 @@ impl Drasi {
             let reaction = descriptor
                 .create_reaction(&id, query_ids, &config, true)
                 .await
-                .map_err(to_napi)?;
+                .map_err(|e| coded_message(DrasiErrorCode::ConfigInvalid, e.to_string()))?;
             inner.drasi.update_reaction(&id, reaction).await.map_err(to_napi)
         })
     }
@@ -1031,6 +1238,113 @@ fn parse_state_store(env: &Env, options: Option<&Value>) -> napi::Result<Option<
     }
 }
 
+/// Configuration for a persistent RocksDB query-index backend (audit gap G6).
+struct RocksIndexConfig {
+    path: String,
+    enable_archive: bool,
+    direct_io: bool,
+}
+
+/// Validate the optional `indexStore` option synchronously (audit gap G6),
+/// returning the RocksDB index config if configured. Unlike `stateStore` (which
+/// persists plugin runtime state via redb), `indexStore` persists the continuous-
+/// query indexes (element/result indexes, future queue) so query state — and the
+/// reaction outbox that durable reactions replay — survives restarts. Raises a
+/// typed error for an unknown kind or a missing path.
+fn parse_index_store(env: &Env, options: Option<&Value>) -> napi::Result<Option<RocksIndexConfig>> {
+    let Some(is) = options.and_then(|o| o.get("indexStore")) else {
+        return Ok(None);
+    };
+    let kind = is.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    match kind {
+        "rocksdb" => {
+            let path = is.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                throw_coded(
+                    env,
+                    DrasiErrorCode::IndexStorePathRequired,
+                    "indexStore.path is required for rocksdb",
+                )
+            })?;
+            Ok(Some(RocksIndexConfig {
+                path: path.to_string(),
+                enable_archive: is
+                    .get("enableArchive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                direct_io: is.get("directIo").and_then(|v| v.as_bool()).unwrap_or(false),
+            }))
+        }
+        other => Err(throw_coded(
+            env,
+            DrasiErrorCode::UnknownIndexStoreKind,
+            format!("unknown indexStore kind '{other}'"),
+        )),
+    }
+}
+
+/// A built-in identity provider configuration (audit gap G8). Credentials are
+/// injected into sources/reactions that connect to external systems.
+enum IdentityConfig {
+    Password { username: String, password: String },
+    Token { username: String, token: String },
+}
+
+/// Construct the drasi-lib identity provider for a parsed [`IdentityConfig`].
+/// `Password` uses the built-in [`PasswordIdentityProvider`]; `Token` wraps a
+/// static [`Credentials::Token`] in an [`ApplicationIdentityProvider`].
+fn build_identity_provider(config: IdentityConfig) -> Arc<dyn IdentityProvider> {
+    match config {
+        IdentityConfig::Password { username, password } => {
+            Arc::new(PasswordIdentityProvider::new(username, password))
+        }
+        IdentityConfig::Token { username, token } => {
+            Arc::new(ApplicationIdentityProvider::new_sync(move |_ctx| {
+                Ok(Credentials::Token {
+                    username: username.clone(),
+                    token: token.clone(),
+                })
+            }))
+        }
+    }
+}
+
+/// Validate the optional `identity` option synchronously (audit gap G8),
+/// returning the built-in identity provider config if present. Raises a typed
+/// error for a missing/unknown kind or missing required credentials.
+fn parse_identity(env: &Env, options: Option<&Value>) -> napi::Result<Option<IdentityConfig>> {
+    let Some(id) = options.and_then(|o| o.get("identity")) else {
+        return Ok(None);
+    };
+    let kind = id.get("kind").and_then(|v| v.as_str()).ok_or_else(|| {
+        throw_coded(env, DrasiErrorCode::IdentityKindRequired, "identity.kind is required")
+    })?;
+    let field = |name: &str| id.get(name).and_then(|v| v.as_str()).map(String::from);
+    let require = |env: &Env, name: &str| -> napi::Result<String> {
+        field(name).ok_or_else(|| {
+            throw_coded(
+                env,
+                DrasiErrorCode::IdentityConfigInvalid,
+                format!("identity.{name} is required for kind '{kind}'"),
+            )
+        })
+    };
+    match kind {
+        "password" => Ok(Some(IdentityConfig::Password {
+            username: require(env, "username")?,
+            password: require(env, "password")?,
+        })),
+        "token" => Ok(Some(IdentityConfig::Token {
+            username: field("username").unwrap_or_default(),
+            token: require(env, "token")?,
+        })),
+        other => Err(throw_coded(
+            env,
+            DrasiErrorCode::UnknownIdentityKind,
+            format!("unknown identity kind '{other}' (expected 'password' or 'token')"),
+        )),
+    }
+}
+
 /// Fail fast with a typed error if `kind` is not a registered source kind.
 fn validate_source_kind(env: &Env, inner: &Inner, kind: &str) -> napi::Result<()> {
     if inner.sources.lock().unwrap().contains_key(kind) {
@@ -1085,6 +1399,19 @@ fn validate_bootstrap(env: &Env, inner: &Inner, bootstrap: Option<&Value>) -> na
 // Async engine helpers (shared by the `#[napi]` wrappers and `fromConfig`)
 // ---------------------------------------------------------------------------
 
+/// Optional persistence/identity providers wired into a new engine, parsed
+/// synchronously from `create`/`fromConfig` options so validation errors carry a
+/// typed `err.code`.
+#[derive(Default)]
+struct EngineParams {
+    /// redb state-store path (plugin runtime state) — audit gap none/existing.
+    state_path: Option<String>,
+    /// RocksDB persistent query-index backend — audit gap G6.
+    index_store: Option<RocksIndexConfig>,
+    /// Identity provider for credential injection — audit gap G8.
+    identity: Option<IdentityConfig>,
+}
+
 /// Build and wrap a `DrasiLib` engine instance.
 ///
 /// The config-resolver and callback contexts are built lazily on first plugin
@@ -1093,14 +1420,26 @@ fn validate_bootstrap(env: &Env, inner: &Inner, bootstrap: Option<&Value>) -> na
 async fn build_engine(
     id: String,
     provider: Arc<dyn SecretStoreProvider>,
-    state_path: Option<String>,
+    params: EngineParams,
 ) -> napi::Result<Drasi> {
     let mut builder = DrasiLib::builder()
         .with_id(id.clone())
         .with_secret_store_provider(provider.clone());
-    if let Some(path) = state_path {
+    let has_durable_state_store = params.state_path.is_some();
+    if let Some(path) = params.state_path {
         let p = drasi_state_store_redb::RedbStateStoreProvider::new(&path).map_err(to_napi)?;
         builder = builder.with_state_store_provider(Arc::new(p));
+    }
+    // Persistent RocksDB query indexes: make it the default backend so every
+    // query persists its element/result indexes and reaction outbox (gap G6).
+    if let Some(idx) = params.index_store {
+        let provider =
+            drasi_index_rocksdb::RocksDbIndexProvider::new(idx.path, idx.enable_archive, idx.direct_io);
+        builder = builder.with_default_index_provider("rocksdb", Arc::new(provider));
+    }
+    // Identity provider for credential injection into sources/reactions (gap G8).
+    if let Some(identity) = params.identity {
+        builder = builder.with_identity_provider(build_identity_provider(identity));
     }
     let core = builder.build().await.map_err(to_napi)?;
     Ok(Drasi {
@@ -1114,6 +1453,7 @@ async fn build_engine(
             plugin_files: Mutex::new(HashMap::new()),
             secret_provider: provider,
             instance_id: id,
+            has_durable_state_store,
             resolver_ctx: OnceLock::new(),
             callback_ctx: OnceLock::new(),
         }),
@@ -1138,7 +1478,7 @@ async fn add_source_full(
     let source = descriptor
         .create_source(&id, &config, auto_start)
         .await
-        .map_err(to_napi)?;
+        .map_err(|e| coded_message(DrasiErrorCode::ConfigInvalid, e.to_string()))?;
 
     if let Some(bs) = bootstrap {
         let bs_kind = bs
@@ -1155,7 +1495,7 @@ async fn add_source_full(
         let provider = bs_descriptor
             .create_bootstrap_provider(&bs_config, &config)
             .await
-            .map_err(to_napi)?;
+            .map_err(|e| coded_message(DrasiErrorCode::ConfigInvalid, e.to_string()))?;
         source.set_bootstrap_provider(provider).await;
     }
 
@@ -1183,7 +1523,7 @@ async fn add_reaction_full(
     let reaction = descriptor
         .create_reaction(&id, query_ids, &config, true)
         .await
-        .map_err(to_napi)?;
+        .map_err(|e| coded_message(DrasiErrorCode::ConfigInvalid, e.to_string()))?;
 
     let mut meta = HashMap::new();
     meta.insert("kind".to_string(), kind);
@@ -1198,6 +1538,27 @@ async fn add_reaction_full(
 /// drasi-lib `QueryJoinConfig` list consumed by `Query::with_joins`.
 fn parse_joins(joins: Value) -> napi::Result<Vec<drasi_lib::config::QueryJoinConfig>> {
     serde_json::from_value(joins).map_err(to_napi)
+}
+
+/// Build a drasi-lib [`Query`] definition from validated parts. `is_gql` selects
+/// the GQL builder (already validated by [`resolve_query_language`]); everything
+/// else uses Cypher. Shared by `addQuery`/`updateQuery` and `fromConfig`.
+fn build_query_def(
+    id: String,
+    query: String,
+    sources: Vec<String>,
+    is_gql: bool,
+    joins: Option<Value>,
+) -> napi::Result<drasi_lib::QueryConfig> {
+    let mut builder = if is_gql { Query::gql(id) } else { Query::cypher(id) };
+    builder = builder.query(query);
+    for source in sources {
+        builder = builder.from_source(source);
+    }
+    if let Some(joins) = joins {
+        builder = builder.with_joins(parse_joins(joins)?);
+    }
+    Ok(builder.build())
 }
 
 /// Scan `dir` for cdylib plugins and register their descriptors into `inner`.

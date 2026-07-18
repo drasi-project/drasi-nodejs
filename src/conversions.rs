@@ -131,6 +131,35 @@ pub fn json_to_source_change(source_id: &str, input: &Value) -> Result<SourceCha
     }
 }
 
+/// Validate a query `language`, returning `true` for GQL and `false` for Cypher.
+///
+/// `None` and `"cypher"` select Cypher; `"gql"` selects GQL. Any other value —
+/// including typos like `"cyper"` or an unsupported dialect like `"sql"` — is a
+/// typed error instead of silently falling back to Cypher (audit gap G10).
+pub fn resolve_query_language(language: Option<&str>) -> Result<bool, CodedReason> {
+    match language {
+        None | Some("cypher") => Ok(false),
+        Some("gql") => Ok(true),
+        Some(other) => Err(CodedReason::new(
+            DrasiErrorCode::UnknownQueryLanguage,
+            format!("unknown query language '{other}' (expected 'cypher' or 'gql')"),
+        )),
+    }
+}
+
+/// Build the `{ name, schema }` object returned by the `*ConfigSchema` accessors
+/// (audit gap G9) from a plugin descriptor's schema name and its
+/// `config_schema_json()` output (a JSON object mapping OpenAPI schema names to
+/// their definitions). `name` is the key of the root config DTO. If the schema
+/// JSON fails to parse — never expected from a well-formed plugin — `schema` falls
+/// back to an **empty object** (not `null`), so the returned shape always matches
+/// the declared `Record<string, unknown>` type.
+pub fn plugin_config_schema(name: &str, schema_json: &str) -> Value {
+    let schema = serde_json::from_str::<Value>(schema_json)
+        .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
+    serde_json::json!({ "name": name, "schema": schema })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +357,46 @@ mod tests {
             json_to_source_change("s", &json!({ "op": "frobnicate", "id": "n1" })).unwrap_err();
         assert_eq!(err.code, DrasiErrorCode::UnknownChangeOp);
         assert!(err.message.contains("frobnicate"), "message names the bad op");
+    }
+
+    #[test]
+    fn language_none_and_cypher_select_cypher() {
+        assert_eq!(resolve_query_language(None), Ok(false));
+        assert_eq!(resolve_query_language(Some("cypher")), Ok(false));
+    }
+
+    #[test]
+    fn language_gql_selects_gql() {
+        assert_eq!(resolve_query_language(Some("gql")), Ok(true));
+    }
+
+    #[test]
+    fn unknown_language_is_rejected_instead_of_defaulting() {
+        for bad in ["sql", "cyper", "GQL", "Cypher", ""] {
+            let err = resolve_query_language(Some(bad)).unwrap_err();
+            assert_eq!(err.code, DrasiErrorCode::UnknownQueryLanguage);
+            assert!(
+                err.message.contains(bad) || bad.is_empty(),
+                "message names the bad language: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_config_schema_wraps_name_and_parsed_schema() {
+        let schema_json = r#"{"source.mock.MockConfig":{"type":"object","required":["nodes"]}}"#;
+        let v = plugin_config_schema("source.mock.MockConfig", schema_json);
+        assert_eq!(v["name"], "source.mock.MockConfig");
+        assert_eq!(v["schema"]["source.mock.MockConfig"]["type"], "object");
+    }
+
+    #[test]
+    fn plugin_config_schema_tolerates_unparseable_schema() {
+        let v = plugin_config_schema("x", "not json");
+        assert_eq!(v["name"], "x");
+        // Falls back to an empty object (not null) to match the declared type.
+        assert!(v["schema"].is_object(), "schema falls back to an empty object");
+        assert_eq!(v["schema"].as_object().unwrap().len(), 0);
     }
 }
