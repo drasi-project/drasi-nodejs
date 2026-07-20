@@ -125,7 +125,7 @@ or [`docs/api-reference.md`](./docs/api-reference.md) for the audit-oriented dee
 | Area | Methods |
 | --- | --- |
 | Plugins | `loadPlugins(dir, verify?)`, `watchPlugins(dir)`, `pluginKinds()`, `sourceConfigSchema(kind)`, `reactionConfigSchema(kind)`, `bootstrapConfigSchema(kind)`, `listPluginTags(repo)`, `pullPlugin(reference, destDir, filename, options?)` |
-| Sources | `addSource(kind, id, config, autoStart?, bootstrap?)`, `addJsSource(id, autoStart?)`, `pushChange(sourceId, change)`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources` |
+| Sources | `addSource(kind, id, config, autoStart?, bootstrap?)`, `addJsSource(id, autoStart?)`, `pushChange(sourceId, change)`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources`, `getSourceSchema(id)`, `getGraphSchema()` |
 | Queries | `addQuery(id, query, sources, language?, joins?)`, `updateQuery`, `startQuery`, `stopQuery`, `removeQuery`, `getQueryResults(id)`, `listQueries` |
 | Reactions | `addReaction(kind, id, queryIds, config)`, `addJsReaction(id, queryIds, cb)`, `addDurableJsReaction(id, queryIds, asyncCb, options?)`, `updateReaction`, `startReaction`, `stopReaction`, `removeReaction`, `listReactions` |
 | Metrics | `getQueryMetrics(id)`, `getReactionMetrics(id)`, `getLifecycleMetrics()` |

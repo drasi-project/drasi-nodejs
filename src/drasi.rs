@@ -749,6 +749,35 @@ impl Drasi {
         Ok(statuses_to_json(items))
     }
 
+    /// Get the best-effort graph schema a source reports about the data flowing
+    /// through it — node/relation labels, their properties, and property-type
+    /// hints — or `null` when the source doesn't describe one. Sources implement
+    /// this on a best-effort basis via `Source::describe_schema()`; it is
+    /// informational, not enforced (drasi-core#416).
+    #[napi(ts_return_type = "Promise<SourceSchema | null>")]
+    pub async fn get_source_schema(&self, id: String) -> napi::Result<Value> {
+        let schema = self
+            .inner
+            .drasi
+            .get_source_schema(&id)
+            .await
+            .map_err(to_napi)?;
+        match schema {
+            Some(s) => serde_json::to_value(s).map_err(to_napi),
+            None => Ok(Value::Null),
+        }
+    }
+
+    /// Get the merged graph schema across all sources and queries: for each
+    /// node/relation label, which sources provide it and which queries reference
+    /// it, plus known properties, and any `sourcesWithoutSchema`. Useful for
+    /// inspection, validation, and LLM/MCP tooling (drasi-core#416).
+    #[napi(ts_return_type = "Promise<GraphSchema>")]
+    pub async fn get_graph_schema(&self) -> napi::Result<Value> {
+        let schema = self.inner.drasi.get_graph_schema().await.map_err(to_napi)?;
+        serde_json::to_value(schema).map_err(to_napi)
+    }
+
     // ------------------------------------------------------------------
     // Queries
     // ------------------------------------------------------------------

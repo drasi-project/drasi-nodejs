@@ -54,7 +54,7 @@ object unless marked **static**.
 | --- | --- |
 | Construction | `create`¹, `fromConfig`¹ |
 | Plugins | `loadPlugins`, `watchPlugins`, `listPluginTags`, `pullPlugin`, `pluginKinds`² |
-| Sources | `addSource`, `addJsSource`, `pushChange`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources` |
+| Sources | `addSource`, `addJsSource`, `pushChange`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources`, `getSourceSchema`, `getGraphSchema` |
 | Queries | `addQuery`, `updateQuery`, `startQuery`, `stopQuery`, `getQueryResults`, `removeQuery`, `listQueries` |
 | Reactions | `addReaction`, `addJsReaction`, `addDurableJsReaction`, `updateReaction`, `startReaction`, `stopReaction`, `removeReaction`, `listReactions` |
 | Metrics | `getQueryMetrics`, `getReactionMetrics`, `getLifecycleMetrics` |
@@ -279,6 +279,47 @@ external state (default `false`).
 
 List sources. `status` is a debug-formatted `ComponentStatus` string (see
 [Component status](#component-status)).
+
+### `getSourceSchema(id)` → `Promise<SourceSchema | null>`
+
+Return the best-effort graph schema a source reports about the data flowing
+through it — node/relation labels, their properties, and property-type hints —
+or `null` when the source exists but doesn't describe one. Sources implement this
+on a best-effort basis via `Source::describe_schema()`; the schema is
+informational, not enforced ([drasi-core#416](https://github.com/drasi-project/drasi-core/pull/416)).
+Throws if `id` is not a known source.
+
+`SourceSchema`:
+
+```ts
+{
+  nodes: Array<{ label: string, properties: PropertySchema[] }>,
+  relations: Array<{ label: string, from?: string, to?: string, properties: PropertySchema[] }>,
+}
+// PropertySchema: { name: string, dataType?: 'string'|'integer'|'float'|'boolean'|'timestamp'|'json', description?: string }
+```
+
+> Distinct from `sourceConfigSchema(kind)` — that returns a plugin's
+> **configuration** schema; this returns the **graph data** schema of a running
+> source instance.
+
+### `getGraphSchema()` → `Promise<GraphSchema>`
+
+Return the merged graph schema across all sources and queries: for each
+node/relation label, which sources provide it and which queries reference it,
+plus known properties, and any sources that exist but couldn't describe a schema.
+Useful for inspection, validation, and LLM/MCP tooling
+([drasi-core#416](https://github.com/drasi-project/drasi-core/pull/416)).
+
+`GraphSchema`:
+
+```ts
+{
+  nodes: Record<string, { sources: string[], queriedBy: string[], properties: PropertySchema[] }>,
+  relations: Record<string, { sources: string[], queriedBy: string[], from?: string, to?: string, properties: PropertySchema[] }>,
+  sourcesWithoutSchema: string[],
+}
+```
 
 ---
 

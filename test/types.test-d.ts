@@ -24,6 +24,8 @@ import type {
   ReactionQueryMetrics,
   ResultDiff,
   SourceChangeInput,
+  SourceSchema,
+  GraphSchema,
   StateStoreOptions,
 } from '../index.js'
 
@@ -189,6 +191,27 @@ const asString: string = someCode
 
 const stateStore: StateStoreOptions = { kind: 'redb', path: '/tmp/x' }
 
+async function schemaDiscovery(): Promise<void> {
+  const d: Drasi = await Drasi.create('app')
+  const src: SourceSchema | null = await d.getSourceSchema('src')
+  if (src) {
+    const label: string = src.nodes[0]?.label
+    const dt: string | undefined | null = src.nodes[0]?.properties[0]?.dataType
+    void label
+    void dt
+  }
+  const graph: GraphSchema = await d.getGraphSchema()
+  const node = graph.nodes['Counter']
+  if (node) {
+    const sources: string[] = node.sources
+    const queriedBy: string[] = node.queriedBy
+    void sources
+    void queriedBy
+  }
+  const missing: string[] = graph.sourcesWithoutSchema
+  void missing
+}
+
 export {
   construction,
   plugins,
@@ -201,4 +224,5 @@ export {
   someCode,
   asString,
   stateStore,
+  schemaDiscovery,
 }

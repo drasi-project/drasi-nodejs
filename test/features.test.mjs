@@ -302,3 +302,44 @@ test('OCI: pull a plugin artifact to disk', { skip: ociSkip }, async () => {
   assert.notEqual(verified.verification.status, 'tampered', 'genuine artifact is not tampered');
   await d.close();
 });
+
+test('getSourceSchema reports a source graph schema', async () => {
+  const d = await Drasi.create('t-src-schema');
+  await d.loadPlugins(pluginsDir);
+  await d.start();
+  await d.addSource('mock', 'src', { dataType: { type: 'counter' }, intervalMs: 500 });
+
+  const schema = await d.getSourceSchema('src');
+  assert.ok(schema, 'schema returned');
+  assert.ok(Array.isArray(schema.nodes), 'nodes is an array');
+  const counter = schema.nodes.find((n) => n.label === 'Counter');
+  assert.ok(counter, 'Counter node described');
+  const value = counter.properties.find((p) => p.name === 'value');
+  assert.ok(value, 'value property described');
+  assert.equal(value.dataType, 'integer', 'value is an integer');
+  assert.ok(Array.isArray(schema.relations), 'relations is an array');
+  await d.close();
+});
+
+test('getSourceSchema throws for an unknown source id', async () => {
+  const d = await Drasi.create('t-src-schema-missing');
+  await d.loadPlugins(pluginsDir);
+  await d.start();
+  await assert.rejects(async () => d.getSourceSchema('nope'), /not found/);
+  await d.close();
+});
+
+test('getGraphSchema merges sources with query references', async () => {
+  const d = await Drasi.create('t-graph-schema');
+  await d.loadPlugins(pluginsDir);
+  await d.start();
+  await d.addSource('mock', 'src', { dataType: { type: 'counter' }, intervalMs: 500 });
+  await d.addQuery('q', 'MATCH (c:Counter) RETURN c.value AS value', ['src']);
+
+  const graph = await d.getGraphSchema();
+  assert.ok(graph.nodes.Counter, 'Counter node present in graph schema');
+  assert.ok(graph.nodes.Counter.sources.includes('src'), 'Counter provided by src');
+  assert.ok(graph.nodes.Counter.queriedBy.includes('q'), 'Counter queried by q');
+  assert.ok(Array.isArray(graph.sourcesWithoutSchema), 'sourcesWithoutSchema is an array');
+  await d.close();
+});
