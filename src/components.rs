@@ -19,8 +19,9 @@ use async_trait::async_trait;
 use napi::bindgen_prelude::Promise;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use serde_json::Value;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 
+use crate::retry::{DurableErrorPolicy, OnError};
 use drasi_core::models::{Element, SourceChange};
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender, QueryResult, SubscriptionResponse};
@@ -37,11 +38,13 @@ pub type JsResultFn = ThreadsafeFunction<Value, (), Value, napi::Status, false, 
 
 /// A durable-reaction callback: like [`JsResultFn`] but the JS handler returns a
 /// `Promise<void>` (`(result) => Promise<void>`) whose resolution the reaction
-/// **awaits** before advancing its checkpoint (audit gap G7). If the promise
-/// rejects, the failure is logged and that result's checkpoint is not advanced,
-/// but processing continues with the next result (the engine loop does not retry
-/// in-process — see #21). Durability is crash recovery of not-yet-checkpointed
-/// results, not per-event at-least-once. Also unref'd (weak).
+/// **awaits** before advancing its checkpoint (audit gap G7). How a *rejected*
+/// promise is handled is governed by the reaction's [`DurableErrorPolicy`]
+/// (`onError`): `retry` (the default) re-invokes the callback with backoff until
+/// it resolves — because the reaction loop stays parked on the event until the
+/// handler returns, the checkpoint cannot leapfrog a failed sequence, giving
+/// true per-event at-least-once; `halt` stops the reaction without advancing the
+/// checkpoint; `skip` moves on (drasi-lib's stock behavior). Also unref'd (weak).
 pub type JsDurableResultFn = ThreadsafeFunction<Value, Promise<()>, Value, napi::Status, false, true>;
 
 /// The callback backing a [`JsReaction`], selecting fire-and-forget delivery or
@@ -70,11 +73,18 @@ enum ReactionCallback {
 /// processed results on restart, and applies a recovery policy for gaps. Durable
 /// reactions require a durable state store (redb); a persistent index backend
 /// (rocksdb) additionally enables cross-process outbox replay.
+///
+/// On a callback rejection the reaction applies its [`DurableErrorPolicy`]
+/// (`onError`, issue #21): `retry` (default), `halt`, or `skip`.
 pub struct JsReaction {
     base: ReactionBase,
     callback: ReactionCallback,
     durable: bool,
     recovery_policy: ReactionRecoveryPolicy,
+    error_policy: DurableErrorPolicy,
+    /// Broadcast latch that tells the durable handler to stop retrying/parking
+    /// so `stop()`/`close()` return promptly. `false` until shutdown.
+    cancel_tx: watch::Sender<bool>,
 }
 
 impl JsReaction {
@@ -87,18 +97,22 @@ impl JsReaction {
             callback: ReactionCallback::FireAndForget(Arc::new(callback)),
             durable: false,
             recovery_policy: ReactionRecoveryPolicy::AutoSkipGap,
+            error_policy: DurableErrorPolicy::default(),
+            cancel_tx: watch::channel(false).0,
         }
     }
 
     /// A durable reaction: results are delivered to `callback` (whose promise is
     /// awaited) and a checkpoint is persisted after each success, so a restart
-    /// resumes without redelivering already-processed results. Requires a durable
-    /// state store on the engine.
+    /// resumes without redelivering already-processed results. `error_policy`
+    /// governs what happens when the callback rejects (issue #21). Requires a
+    /// durable state store on the engine.
     pub fn new_durable(
         id: String,
         query_ids: Vec<String>,
         callback: JsDurableResultFn,
         recovery_policy: ReactionRecoveryPolicy,
+        error_policy: DurableErrorPolicy,
     ) -> Self {
         let params = ReactionBaseParams::new(id, query_ids).with_recovery_policy(recovery_policy);
         Self {
@@ -106,6 +120,8 @@ impl JsReaction {
             callback: ReactionCallback::Durable(Arc::new(callback)),
             durable: true,
             recovery_policy,
+            error_policy,
+            cancel_tx: watch::channel(false).0,
         }
     }
 }
@@ -178,29 +194,105 @@ impl Reaction for JsReaction {
             }
             ReactionCallback::Durable(cb) => {
                 // Load persisted checkpoints so already-checkpointed results are
-                // skipped, then run the engine's checkpoint-aware loop. The handler
-                // awaits the JS promise; on success the checkpoint advances to that
-                // sequence. On rejection the loop logs and moves on WITHOUT retrying
-                // (see the type docs / #21): durability is crash recovery of
-                // not-yet-checkpointed results, not per-event at-least-once.
+                // skipped, then run drasi-lib's stock checkpoint-aware loop. The
+                // handler applies the configured error policy (issue #21):
+                //   * `retry` (default) re-invokes the JS callback with backoff
+                //     until it resolves. Because `run_standard_loop` stays parked
+                //     on the event until the handler returns, the checkpoint can
+                //     never leapfrog a failed sequence — true per-event
+                //     at-least-once, using only stock machinery. A finite
+                //     `maxRetries` escalates to halt once exhausted.
+                //   * `halt` sets the reaction status to Error and parks until
+                //     shutdown, leaving the checkpoint at the last success so a
+                //     failed sequence is never buried (head-of-line for the
+                //     reaction); recovery on restart follows the recovery policy.
+                //   * `skip` returns an error so the loop advances to the next
+                //     event without checkpointing (drasi-lib's stock behavior).
                 let checkpoints = self.base.read_all_checkpoints().await.unwrap_or_default();
-                let base = self.base.clone_shared();
+                let base_loop = self.base.clone_shared();
+                let base_handler = self.base.clone_shared();
                 let callback = cb.clone();
+                let policy = self.error_policy;
+                let cancel_tx = self.cancel_tx.clone();
+                let reaction_id = self.base.id.clone();
                 tokio::spawn(async move {
-                    let result = base
+                    let result = base_loop
                         .run_standard_loop(shutdown_rx, checkpoints, move |event: Arc<QueryResult>| {
                             let callback = callback.clone();
+                            let cancel_tx = cancel_tx.clone();
+                            let base = base_handler.clone_shared();
+                            let reaction_id = reaction_id.clone();
                             async move {
                                 if event.results.is_empty() {
                                     return Ok(());
                                 }
                                 let value = serde_json::to_value(&*event).unwrap_or(Value::Null);
-                                // Await both the call and the returned promise so the
-                                // checkpoint only advances once JS has finished
-                                // processing this result.
-                                let promise = callback.call_async(value).await?;
-                                promise.await?;
-                                Ok(())
+                                let query_id = event.query_id.clone();
+                                let seq = event.sequence;
+
+                                let mut retries: u64 = 0;
+                                loop {
+                                    // Await the JS handler, racing cancellation so
+                                    // shutdown never blocks on a slow callback.
+                                    let mut cancel_rx = cancel_tx.subscribe();
+                                    let attempt: Result<()> = tokio::select! {
+                                        biased;
+                                        _ = cancel_rx.wait_for(|v| *v) => {
+                                            return Err(anyhow::anyhow!(
+                                                "durable reaction '{reaction_id}' cancelled while processing query={query_id} seq={seq}"
+                                            ));
+                                        }
+                                        r = async {
+                                            let promise = callback.call_async(value.clone()).await?;
+                                            promise.await?;
+                                            Ok::<(), anyhow::Error>(())
+                                        } => r,
+                                    };
+
+                                    let err = match attempt {
+                                        Ok(()) => return Ok(()),
+                                        Err(e) => e,
+                                    };
+
+                                    match policy.on_error {
+                                        OnError::Skip => {
+                                            // Stock behavior: leave the checkpoint
+                                            // unchanged and proceed to the next event.
+                                            return Err(err);
+                                        }
+                                        OnError::Retry if !policy.retries_exhausted(retries) => {
+                                            retries += 1;
+                                            let delay = policy.backoff_delay(retries);
+                                            log::warn!(
+                                                "[{reaction_id}] durable callback rejected for query={query_id} seq={seq}: {err:#}; retry {retries} in {delay:?}"
+                                            );
+                                            let mut cancel_rx = cancel_tx.subscribe();
+                                            tokio::select! {
+                                                biased;
+                                                _ = cancel_rx.wait_for(|v| *v) => {
+                                                    return Err(anyhow::anyhow!(
+                                                        "durable reaction '{reaction_id}' cancelled during backoff for query={query_id} seq={seq}"
+                                                    ));
+                                                }
+                                                _ = tokio::time::sleep(delay) => {}
+                                            }
+                                            continue;
+                                        }
+                                        // `halt`, or `retry` whose budget is exhausted:
+                                        // stop making progress so the failed event is
+                                        // never buried by a later checkpoint.
+                                        _ => {
+                                            let msg = format!(
+                                                "durable reaction '{reaction_id}' halted on query={query_id} seq={seq}: {err:#}"
+                                            );
+                                            log::error!("{msg}");
+                                            base.set_status(ComponentStatus::Error, Some(msg)).await;
+                                            let mut cancel_rx = cancel_tx.subscribe();
+                                            let _ = cancel_rx.wait_for(|v| *v).await;
+                                            return Err(err);
+                                        }
+                                    }
+                                }
                             }
                         })
                         .await;
@@ -216,6 +308,9 @@ impl Reaction for JsReaction {
     }
 
     async fn stop(&self) -> Result<()> {
+        // Wake any in-flight retry/backoff or halt-park so the loop unwinds and
+        // stop_common()'s shutdown signal can break it promptly.
+        let _ = self.cancel_tx.send(true);
         self.base.stop_common().await
     }
 

@@ -903,17 +903,20 @@ impl Drasi {
     /// Unlike [`add_js_reaction`](Self::add_js_reaction), `callback` must be an
     /// async function `(result) => Promise<void>`; the reaction awaits its promise
     /// and persists a per-query checkpoint after each successfully processed
-    /// result. On restart it resumes **after the last checkpointed sequence**, so
-    /// results that were processed-but-not-yet-checkpointed when the process died
-    /// are re-delivered — i.e. durability here is **crash recovery of
-    /// not-yet-checkpointed results**, not per-event at-least-once.
+    /// result. On restart it resumes **after the last checkpointed sequence**.
     ///
-    /// If the promise rejects, the failure is logged and that result's checkpoint
-    /// is not advanced, but processing continues with the next result; the callback
-    /// is **not** retried in-process, and a later success for the same query
-    /// advances the checkpoint past the failed sequence (so it is not retried on
-    /// restart either). See #21 for tracking true per-event at-least-once
-    /// (halt-on-error / bounded retry).
+    /// Behavior when the promise **rejects** is set by `options.onError`
+    /// (issue #21):
+    /// - `'retry'` (default): re-invoke the callback with exponential backoff until
+    ///   it resolves. The reaction stays parked on the failed event, so the
+    ///   checkpoint never advances past it — **per-event at-least-once**. Tunable
+    ///   via `maxRetries` (finite budget escalates to `halt` once exhausted),
+    ///   `retryDelayMs` (base), and `maxRetryDelayMs` (cap).
+    /// - `'halt'`: stop the reaction (status `Error`) leaving the checkpoint at the
+    ///   last success, so a failed sequence is never buried (head-of-line).
+    /// - `'skip'`: log and advance to the next result without checkpointing the
+    ///   failed one (drasi-lib's stock behavior; a later success can bury it, so
+    ///   this is at-most-once for a transiently-failing callback).
     ///
     /// Requires a durable state store (`{ stateStore: { kind: 'redb', path } }`) —
     /// validated synchronously with `DURABLE_REQUIRES_STATE_STORE`. Pair with a
@@ -947,9 +950,10 @@ impl Drasi {
             Some("strict") => drasi_lib::recovery::ReactionRecoveryPolicy::Strict,
             _ => drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap,
         };
+        let error_policy = crate::retry::DurableErrorPolicy::from_options(options.as_ref());
         let inner = self.inner.clone();
         env.spawn_future(async move {
-            let reaction = JsReaction::new_durable(id, query_ids, callback, policy);
+            let reaction = JsReaction::new_durable(id, query_ids, callback, policy, error_policy);
             let mut meta = HashMap::new();
             meta.insert("kind".to_string(), "js-callback".to_string());
             meta.insert("durable".to_string(), "true".to_string());

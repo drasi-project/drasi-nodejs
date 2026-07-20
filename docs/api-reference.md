@@ -347,28 +347,46 @@ Add a JavaScript-defined reaction whose logic is a callback.
 Add a **durable, checkpointed** JavaScript reaction (audit gap G7).
 
 - `callback` is an **async** function `(result: QueryResultEvent) => Promise<void>`.
-  The reaction **awaits** its promise and then persists a per-query checkpoint, so
-  a restart resumes **after the last checkpointed sequence** — results that were
-  processed but not yet checkpointed when the process died are re-delivered. Empty
+  The reaction **awaits** its promise and then persists a per-query checkpoint. Empty
   batches are skipped.
-- `options?: { recoveryPolicy?: 'skipGap' | 'strict' }` — how to recover on a
-  detected gap: `skipGap` (default) resumes from the latest available sequence;
-  `strict` fails if the checkpointed position is unavailable.
+- `options?`:
+  - `recoveryPolicy?: 'skipGap' | 'strict'` — how to recover on a detected gap:
+    `skipGap` (default) resumes from the latest available sequence; `strict` fails if
+    the checkpointed position is unavailable.
+  - `onError?: 'retry' | 'halt' | 'skip'` — what to do when the callback's promise
+    rejects (see below). Default `'retry'`.
+  - `maxRetries?: number` — for `onError: 'retry'`, the retry budget before escalating
+    to halt. Omit (or a negative value) for **unlimited**; `0` halts on the first
+    failure.
+  - `retryDelayMs?: number` — base exponential-backoff delay in ms (default `100`).
+  - `maxRetryDelayMs?: number` — backoff cap in ms (default `30000`).
 
-**Durability semantics (important):** this is **crash recovery of not-yet-checkpointed
-results**, *not* per-event at-least-once. If the callback's promise rejects, the
-failure is logged and that result's checkpoint is not advanced, but processing
-continues with the **next** result; the callback is **not** retried in-process, and
-a later success for the same query advances the checkpoint past the failed
-sequence (so it is not retried on restart either). True per-event at-least-once
-(halt-on-error / bounded retry) is tracked in
-[#21](https://github.com/drasi-project/drasi-nodejs/issues/21).
+**Per-event at-least-once (`onError`, issue #21):** the policy is applied *inside* the
+handler, on top of drasi-lib's stock checkpoint loop — the reaction never advances the
+checkpoint past an event it hasn't successfully processed.
+
+- **`'retry'` (default)** — re-invoke the callback with exponential backoff (`retryDelayMs`
+  → `maxRetryDelayMs`, doubling) **until it resolves**. Because the reaction stays parked
+  on the failed event until the handler succeeds, the checkpoint can never leapfrog it:
+  **true per-event at-least-once** for a transiently-failing callback. A finite
+  `maxRetries` escalates to `halt` once exhausted.
+- **`'halt'`** — stop the reaction (status `error`) on the first failure, leaving the
+  checkpoint at the last success. No later event is processed (head-of-line for the whole
+  reaction). Use when out-of-order side effects are unacceptable.
+- **`'skip'`** — log the failure and advance to the **next** result without checkpointing
+  the failed one (drasi-lib's stock behavior). A later success for the same query then
+  advances the checkpoint past the failed sequence, so this is effectively **at-most-once**
+  for a transiently-failing callback. Opt-in, for fire-and-mostly-forget durable reactions.
+
+Note that `retry`/`halt` are **head-of-line** at the reaction level: a single loop serves
+all of a reaction's queries, so a stuck event pauses the others until it clears.
 
 **Requires a durable state store** (`{ stateStore: { kind: 'redb', path } }`) —
 otherwise throws `DURABLE_REQUIRES_STATE_STORE` synchronously. Pair with a
 persistent `indexStore` (rocksdb, G6) so the reaction outbox is replayable across
 process restarts. Checkpoint progress is observable via `getReactionMetrics(id)`
 (`checkpointSequence`).
+
 
 ### `updateReaction(kind, id, queryIds, config)` → `Promise<void>`
 
@@ -565,7 +583,7 @@ Each gap is mapped to an existing subtask of [team#85](https://github.com/drasi-
 | **G4** | ⚠️ **Largely resolved ([PR #5](https://github.com/drasi-project/drasi-nodejs/pull/5)).** Typed error codes added: validation errors throw synchronously with a stable `err.code` from the exported `DrasiErrorCode` enum (async/engine errors still reject with `GenericFailure` and carry a `[CODE]` token in the message). **Remaining:** `ComponentStatus` from `list*` is still a debug-formatted string, not a typed enum. | High | [team#98](https://github.com/drasi-project/team/issues/98) |
 | **G5** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97)).** `pullPlugin` accepts `{ verify, requireSigned, trustedIdentities }` and **enforces** cosign verification via the host SDK's `CosignVerifier`: a `tampered`, untrusted-signer (or, with `requireSigned`, `unsigned`) artifact is deleted and the promise rejects with a `[PLUGIN_SIGNATURE_INVALID]` message token (async path; `err.code` stays `GenericFailure`). Trust is enforced in the binding via `matches_trusted_identity` (the SDK's `Verified` status alone does not check the signer). `verification` is now a structured object (`{ status, issuer?, subject?, reason? }`). | High | [team#97](https://github.com/drasi-project/team/issues/97) |
 | **G6** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97), #16).** A RocksDB persistent query-index backend is now wired via a new `indexStore: { kind: 'rocksdb', path, enableArchive?, directIo? }` option on `create`/`fromConfig` (`with_default_index_provider` + `drasi-index-rocksdb`), so element/result indexes and the reaction outbox persist across restarts. (Adds a bundled RocksDB C++ build — CI/release install libclang for bindgen.) | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
-| **G7** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97), #17).** `addDurableJsReaction(id, queryIds, asyncCallback, options?)` opts a JS reaction into the engine's checkpoint machinery: it awaits the callback's promise and persists a per-query checkpoint after each success, so a restart resumes after the last checkpointed sequence (crash recovery of not-yet-checkpointed results). Recovery policy (`skipGap`/`strict`) handles gaps. Requires a durable state store (`DURABLE_REQUIRES_STATE_STORE` otherwise); pair with `indexStore` (G6) for cross-process outbox replay. **Note:** a rejected callback is logged and **not** retried in-process, and a later success for the same query advances the checkpoint past it — so this is **not** per-event at-least-once; that is tracked in [#21](https://github.com/drasi-project/drasi-nodejs/issues/21). | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
+| **G7** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97), #17, #21).** `addDurableJsReaction(id, queryIds, asyncCallback, options?)` opts a JS reaction into the engine's checkpoint machinery: it awaits the callback's promise and persists a per-query checkpoint after each success. Recovery policy (`skipGap`/`strict`) handles gaps. On a callback rejection the reaction applies `options.onError` (#21): **`retry`** (default) re-invokes with exponential backoff until it resolves — the loop stays parked on the failed event so its checkpoint can never be leapfrogged (**per-event at-least-once**), with an optional `maxRetries` budget (then escalates to `halt`), `retryDelayMs`, and `maxRetryDelayMs`; **`halt`** stops the reaction (status `error`) without advancing the checkpoint; **`skip`** logs and advances past the failed event (the historical stock behavior; at-most-once). Requires a durable state store (`DURABLE_REQUIRES_STATE_STORE` otherwise); pair with `indexStore` (G6) for cross-process outbox replay. | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
 | **G8** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97), #20).** A built-in identity provider is wired via an `identity: { kind: 'password' \| 'token', … }` option on `create`/`fromConfig` (`with_identity_provider`), injecting credentials into sources/reactions that need them. Config is validated synchronously (`IDENTITY_KIND_REQUIRED`/`UNKNOWN_IDENTITY_KIND`/`IDENTITY_CONFIG_INVALID`). | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
 | **G9** | ⚠️ **Partially resolved ([team#97](https://github.com/drasi-project/team/issues/97)).** Each plugin kind's declared config schema is now exposed via `sourceConfigSchema`/`reactionConfigSchema`/`bootstrapConfigSchema` (from the descriptors' `config_schema_json()`), and a plugin's config rejection carries a stable `[CONFIG_INVALID]` token in the message (async path; `err.code` stays `GenericFailure`) instead of an untokened error. **Remaining:** full in-Rust JSON-schema enforcement is deferred — the utoipa/OpenAPI dialect risks false-positive rejections of currently-valid configs; callers can validate against the exposed schema (e.g. ajv). | Medium | [team#97](https://github.com/drasi-project/team/issues/97) |
 | **G10** | ✅ **Resolved ([team#97](https://github.com/drasi-project/team/issues/97)).** `addQuery`/`updateQuery`/`fromConfig` now reject any `language` other than `"cypher"`/`"gql"` (or omitted) with a typed synchronous `UNKNOWN_QUERY_LANGUAGE` error instead of silently defaulting to Cypher. | Low | [team#97](https://github.com/drasi-project/team/issues/97) |

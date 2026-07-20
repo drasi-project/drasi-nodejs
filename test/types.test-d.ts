@@ -148,6 +148,26 @@ async function reactions(d: Drasi): Promise<void> {
     },
     durableOpts,
   )
+  // Durable error policy (issue #21): onError + retry knobs are all optional.
+  const retryOpts: DurableReactionOptions = {
+    onError: 'retry',
+    maxRetries: 5,
+    retryDelayMs: 100,
+    maxRetryDelayMs: 30000,
+  }
+  void retryOpts
+  const haltOpts: DurableReactionOptions = { onError: 'halt' }
+  void haltOpts
+  const skipOpts: DurableReactionOptions = { onError: 'skip' }
+  void skipOpts
+  await d.addDurableJsReaction(
+    'js-durable-retry',
+    ['q'],
+    async (result: QueryResultEvent): Promise<void> => {
+      void result.sequence
+    },
+    { onError: 'halt', maxRetries: 3 },
+  )
   await d.updateReaction('log', 'r', ['q'], {})
   const list: ComponentStatusEntry[] = await d.listReactions()
   void list
