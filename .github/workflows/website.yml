@@ -1,0 +1,90 @@
+# Build and deploy the @drasi/lib documentation site (Hugo + Docsy) to GitHub Pages.
+#
+# The site lives in `website/`. Docsy is vendored as a git submodule at
+# `website/themes/docsy`, and its Bootstrap/Font Awesome assets plus the site's
+# PostCSS pipeline are installed with npm at build time.
+
+name: Docs Website
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - ".github/workflows/website.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "website/**"
+      - ".github/workflows/website.yml"
+
+# Allow the deploy job to publish to GitHub Pages via OIDC.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never run two Pages deployments at once; let an in-flight one finish.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Hugo site
+    runs-on: ubuntu-latest
+    env:
+      HUGO_VERSION: 0.152.2
+    steps:
+      - name: Checkout (with Docsy submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0 # full history so Docsy can compute lastmod from git
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Hugo (extended)
+        uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: ${{ env.HUGO_VERSION }}
+          extended: true
+
+      - name: Configure GitHub Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Install site and theme dependencies
+        working-directory: website
+        run: |
+          npm install
+          npm --prefix themes/docsy install
+
+      - name: Build
+        working-directory: website
+        # `configure-pages` provides the correct base URL for the Pages site
+        # (project pages live under /<repo>/), so links resolve under the subpath.
+        run: hugo --gc --minify --baseURL "${{ steps.pages.outputs.base_url }}/"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/public
+
+  deploy:
+    name: Deploy to GitHub Pages
+    # Only publish from main; PRs build for validation only.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
