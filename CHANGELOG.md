@@ -9,6 +9,15 @@ release process.
 
 ## [Unreleased]
 
+### Added
+
+- `getSourceSchema(id)` and `getGraphSchema()` expose the source & graph schema
+  discovery API ([drasi-core#416](https://github.com/drasi-project/drasi-core/pull/416)):
+  the graph shape (node/relation labels, properties, and type hints) that sources
+  report, and a merged view across sources and queries. Distinct from the
+  plugin-config schema accessors. Foundation for inspection, validation, and
+  LLM/MCP tooling.
+
 ## [0.1.1] - 2026-07-17
 
 ### Added
