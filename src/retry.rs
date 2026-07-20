@@ -96,8 +96,8 @@ impl DurableErrorPolicy {
             }
         }
 
-        // `maxRetries` <= 0 means "no retries" (halt on first failure); a missing
-        // or non-numeric value keeps the default (unlimited).
+        // `maxRetries: 0` means "no retries" (halt on the first failure). A
+        // missing, negative, or non-integer value keeps the default (unlimited).
         if let Some(v) = obj.get("maxRetries") {
             if let Some(n) = parse_non_negative_u64(v) {
                 policy.max_retries = Some(n);
@@ -122,7 +122,8 @@ impl DurableErrorPolicy {
 
     /// Exponential backoff delay for the given 1-based retry attempt, capped at
     /// [`Self::max_delay`]. Attempt 1 returns the base delay, attempt 2 doubles
-    /// it, and so on. Saturating math avoids overflow for large attempts.
+    /// it, and so on; attempt 0 is treated as attempt 1 (base delay) defensively.
+    /// Saturating math avoids overflow for large attempts.
     pub fn backoff_delay(&self, attempt: u64) -> Duration {
         let base_ms = self.base_delay.as_millis().max(1);
         let max_ms = self.max_delay.as_millis().max(base_ms);
@@ -139,15 +140,16 @@ impl DurableErrorPolicy {
     }
 }
 
-/// Parse a JSON value as a non-negative integer, tolerating both integer- and
-/// float-encoded numbers (napi marshals JS numbers as f64). Returns `None` for
-/// negative, non-finite, or non-numeric values.
+/// Parse a JSON value as a non-negative integer, tolerating integer-valued
+/// floats (napi marshals JS numbers as f64). Returns `None` for negative,
+/// fractional, non-finite, or non-numeric values so an accidental fractional
+/// input never silently changes the retry semantics.
 fn parse_non_negative_u64(v: &Value) -> Option<u64> {
     if let Some(u) = v.as_u64() {
         return Some(u);
     }
     if let Some(f) = v.as_f64() {
-        if f.is_finite() && f >= 0.0 {
+        if f.is_finite() && f >= 0.0 && f.fract() == 0.0 {
             return Some(f as u64);
         }
     }
@@ -236,6 +238,16 @@ mod tests {
         let p = DurableErrorPolicy::from_options(Some(&opts));
         assert_eq!(p.max_retries, Some(0));
         assert!(p.retries_exhausted(0));
+    }
+
+    #[test]
+    fn from_options_rejects_fractional_numbers() {
+        // A fractional value must not silently truncate (0.9 -> 0 would flip a
+        // retry into an immediate halt), so it keeps the default instead.
+        let opts = json!({ "maxRetries": 0.9, "retryDelayMs": 12.5 });
+        let p = DurableErrorPolicy::from_options(Some(&opts));
+        assert_eq!(p.max_retries, None);
+        assert_eq!(p.base_delay, Duration::from_millis(DEFAULT_BASE_DELAY_MS));
     }
 
     #[test]

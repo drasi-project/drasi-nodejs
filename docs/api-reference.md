@@ -356,8 +356,8 @@ Add a **durable, checkpointed** JavaScript reaction (audit gap G7).
   - `onError?: 'retry' | 'halt' | 'skip'` — what to do when the callback's promise
     rejects (see below). Default `'retry'`.
   - `maxRetries?: number` — for `onError: 'retry'`, the retry budget before escalating
-    to halt. Omit (or a negative value) for **unlimited**; `0` halts on the first
-    failure.
+    to halt. Omit for **unlimited**; `0` halts on the first failure. Must be a
+    non-negative integer (fractional or negative values are ignored).
   - `retryDelayMs?: number` — base exponential-backoff delay in ms (default `100`).
   - `maxRetryDelayMs?: number` — backoff cap in ms (default `30000`).
 
@@ -370,9 +370,9 @@ checkpoint past an event it hasn't successfully processed.
   on the failed event until the handler succeeds, the checkpoint can never leapfrog it:
   **true per-event at-least-once** for a transiently-failing callback. A finite
   `maxRetries` escalates to `halt` once exhausted.
-- **`'halt'`** — stop the reaction (status `error`) on the first failure, leaving the
-  checkpoint at the last success. No later event is processed (head-of-line for the whole
-  reaction). Use when out-of-order side effects are unacceptable.
+- **`'halt'`** — stop the reaction (status `Error`, as reported by `listReactions()`) on
+  the first failure, leaving the checkpoint at the last success. No later event is processed
+  (head-of-line for the whole reaction). Use when out-of-order side effects are unacceptable.
 - **`'skip'`** — log the failure and advance to the **next** result without checkpointing
   the failed one (drasi-lib's stock behavior). A later success for the same query then
   advances the checkpoint past the failed sequence, so this is effectively **at-most-once**

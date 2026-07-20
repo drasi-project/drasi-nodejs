@@ -381,8 +381,6 @@ test('durable reaction (onError skip) drops the failed event and continues', asy
 
 const ociSkip = process.env.DRASI_OCI_TESTS ? false : 'set DRASI_OCI_TESTS=1 to run OCI registry tests';
 
-
-
 test('OCI: list plugin tags from the public registry', { skip: ociSkip }, async () => {
   const d = await Drasi.create('t-oci-tags');
   const tags = await d.listPluginTags('source/postgres');

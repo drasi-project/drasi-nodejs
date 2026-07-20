@@ -309,8 +309,10 @@ impl Reaction for JsReaction {
 
     async fn stop(&self) -> Result<()> {
         // Wake any in-flight retry/backoff or halt-park so the loop unwinds and
-        // stop_common()'s shutdown signal can break it promptly.
-        let _ = self.cancel_tx.send(true);
+        // stop_common()'s shutdown signal can break it promptly. `send_replace`
+        // (rather than `send`) so the latch is set even when no receiver is
+        // subscribed at this instant — a later `subscribe()` still observes it.
+        self.cancel_tx.send_replace(true);
         self.base.stop_common().await
     }
 

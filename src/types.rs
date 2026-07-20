@@ -152,15 +152,17 @@ pub struct DurableReactionOptions {
     /// - `'retry'` (default): re-invoke with exponential backoff until it
     ///   succeeds, so the checkpoint never advances past the failed event
     ///   (per-event at-least-once). A finite `maxRetries` escalates to `'halt'`.
-    /// - `'halt'`: stop the reaction (status `error`), leaving the checkpoint at
-    ///   the last success so a failed sequence is never buried (head-of-line).
+    /// - `'halt'`: stop the reaction (status `Error`, per `listReactions()`),
+    ///   leaving the checkpoint at the last success so a failed sequence is never
+    ///   buried (head-of-line).
     /// - `'skip'`: log and move on without checkpointing the failed event
     ///   (drasi-lib's stock behavior; can bury the event — at-most-once).
     #[napi(ts_type = "'retry' | 'halt' | 'skip'")]
     pub on_error: Option<String>,
 
-    /// Maximum retries for `onError: 'retry'` before escalating to halt. Omit (or
-    /// a negative value) for unlimited retries; `0` halts on the first failure.
+    /// Maximum retries for `onError: 'retry'` before escalating to halt. Omit for
+    /// unlimited retries; `0` halts on the first failure. Non-integer or negative
+    /// values are ignored.
     pub max_retries: Option<u32>,
 
     /// Base backoff delay (milliseconds) for the first retry. Default `100`.
