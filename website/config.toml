@@ -77,7 +77,7 @@ defaultContentLanguageInSubdir = false
   sidebar_menu_foldable = true
   sidebar_menu_truncate = 100
   ul_show = 1
-  navbar_logo = false
+  navbar_logo = true
   showLightDarkModeMenu = true
   [params.ui.readingtime]
     enable = true

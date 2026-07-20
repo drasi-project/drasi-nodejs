@@ -65,3 +65,18 @@ description: >
 `weight` orders items in the sidebar (lowest first). Cross-page links use relative
 paths (e.g. `../api/#addquery...`) so they resolve under the site's `/drasi-nodejs/`
 base path on GitHub Pages.
+
+## Theming
+
+The site uses Drasi's brand theme, mirrored from the main
+[`drasi-project/docs`](https://github.com/drasi-project/docs) site:
+
+- `assets/scss/_variables_project.scss` — brand colors (navy `#1f203f` + green
+  `#75de6f`), typography, and design tokens (Docsy variable overrides).
+- `assets/scss/_variables_project_after_bs.scss` — custom Bootstrap theme colors.
+- `assets/scss/_styles_project.scss` — component and content styling (hero, flow
+  diagram, cards, code blocks, syntax highlighting).
+- `assets/icons/logo.svg` — the Drasi logo shown in the navbar.
+- `layouts/_partials/hooks/head-end.html` — loads the Inter and JetBrains Mono
+  Google Fonts and defaults to light mode.
+
