@@ -9,6 +9,21 @@ release process.
 
 ## [Unreleased]
 
+### Added
+
+- `addDurableJsReaction` now supports a per-event error policy for true per-event
+  at-least-once delivery (issue #21). `options.onError` selects `'retry'` (the new
+  default — re-invoke the callback with exponential backoff until it resolves so the
+  checkpoint never advances past a failed event), `'halt'` (stop the reaction without
+  advancing), or `'skip'` (the previous stock behavior: log and move on, at-most-once).
+  Tunable via `maxRetries`, `retryDelayMs`, and `maxRetryDelayMs`.
+
+### Changed
+
+- The default behavior of `addDurableJsReaction` on a rejected callback changed from
+  skip-and-continue to `retry`. This is a strictly stronger delivery guarantee; pass
+  `{ onError: 'skip' }` to restore the previous behavior.
+
 ## [0.1.1] - 2026-07-17
 
 ### Added

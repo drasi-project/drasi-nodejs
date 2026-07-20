@@ -256,6 +256,129 @@ test('durable JS reaction delivers results and advances its checkpoint', async (
   assert.ok(advanced, 'durable reaction advanced its persisted checkpoint');
   await d.close();
 });
+
+// G7 / #21: the DEFAULT policy is `retry` — a transiently-failing callback is
+// re-invoked (with backoff) until it succeeds, so the failed event is delivered
+// and its checkpoint advances. This is the core per-event at-least-once guarantee
+// (under the old skip-on-error default, 'carol' would have been lost forever).
+test('durable reaction (default retry) recovers a transiently-failing callback', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-retry-'));
+  const d = await Drasi.create('t-durable-retry', {
+    stateStore: { kind: 'redb', path: join(dir, 'state.redb') },
+    indexStore: { kind: 'rocksdb', path: join(dir, 'idx') },
+  });
+  await d.start();
+  await d.addJsSource('g');
+  await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+  let attempts = 0;
+  const seen = [];
+  // No onError option -> default 'retry'. Small delays keep the test fast.
+  await d.addDurableJsReaction(
+    'r',
+    ['q'],
+    async (result) => {
+      attempts += 1;
+      // Reject the first two attempts, then accept.
+      if (attempts < 3) throw new Error('transient failure');
+      for (const diff of result.results) {
+        if (diff.data && diff.data.name) seen.push(diff.data.name);
+      }
+    },
+    { retryDelayMs: 20, maxRetryDelayMs: 50 },
+  );
+  await d.pushChange('g', { op: 'insert', id: 't1', labels: ['Thing'], properties: { name: 'carol' } });
+  const delivered = await waitUntil(() => seen.includes('carol'));
+  assert.ok(delivered, 'event was redelivered by retry and finally processed');
+  assert.ok(attempts >= 3, `callback was retried (attempts=${attempts})`);
+  const advanced = await waitUntil(async () => {
+    const m = await d.getReactionMetrics('r');
+    return m.q && m.q.checkpointSequence >= 1;
+  });
+  assert.ok(advanced, 'checkpoint advanced only after the retry succeeded');
+  await d.close();
+});
+
+// G7 / #21: `onError: 'halt'` stops the reaction on a permanently-failing
+// callback WITHOUT advancing the checkpoint and WITHOUT delivering later events
+// (head-of-line), so the failed event is never buried.
+test('durable reaction (onError halt) stops without advancing the checkpoint', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-halt-'));
+  const d = await Drasi.create('t-durable-halt', {
+    stateStore: { kind: 'redb', path: join(dir, 'state.redb') },
+    indexStore: { kind: 'rocksdb', path: join(dir, 'idx') },
+  });
+  await d.start();
+  await d.addJsSource('g');
+  await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+  const seen = [];
+  await d.addDurableJsReaction(
+    'r',
+    ['q'],
+    async (result) => {
+      for (const diff of result.results) {
+        if (diff.data && diff.data.name) seen.push(diff.data.name);
+      }
+      throw new Error('always fails');
+    },
+    { onError: 'halt' },
+  );
+  await d.pushChange('g', { op: 'insert', id: 't1', labels: ['Thing'], properties: { name: 'first' } });
+  // The reaction should transition to an error status.
+  const halted = await waitUntil(async () => {
+    const reactions = await d.listReactions();
+    const r = reactions.find((x) => x.id === 'r');
+    return r && r.status === 'Error';
+  });
+  assert.ok(halted, 'reaction halted with an error status');
+  // A later event must NOT be processed while halted (head-of-line).
+  await d.pushChange('g', { op: 'insert', id: 't2', labels: ['Thing'], properties: { name: 'second' } });
+  await sleep(300);
+  assert.ok(!seen.includes('second'), 'second event was not delivered while halted');
+  await d.close();
+});
+
+// G7 / #21: `onError: 'skip'` preserves drasi-lib's stock behavior — the failed
+// event is dropped (not retried) and processing continues, so a later success
+// advances the checkpoint past it. Opt-in, for back-compat.
+test('durable reaction (onError skip) drops the failed event and continues', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-skip-'));
+  const d = await Drasi.create('t-durable-skip', {
+    stateStore: { kind: 'redb', path: join(dir, 'state.redb') },
+    indexStore: { kind: 'rocksdb', path: join(dir, 'idx') },
+  });
+  await d.start();
+  await d.addJsSource('g');
+  await d.addQuery('q', 'MATCH (t:Thing) RETURN t.name AS name', ['g']);
+  let failAttempts = 0;
+  const seen = [];
+  await d.addDurableJsReaction(
+    'r',
+    ['q'],
+    async (result) => {
+      for (const diff of result.results) {
+        const name = diff.data && diff.data.name;
+        if (name === 'fail-me') {
+          failAttempts += 1;
+          throw new Error('rejecting fail-me');
+        }
+        if (name) seen.push(name);
+      }
+    },
+    { onError: 'skip' },
+  );
+  await d.pushChange('g', { op: 'insert', id: 't1', labels: ['Thing'], properties: { name: 'fail-me' } });
+  await d.pushChange('g', { op: 'insert', id: 't2', labels: ['Thing'], properties: { name: 'keep-me' } });
+  const delivered = await waitUntil(() => seen.includes('keep-me'));
+  assert.ok(delivered, 'later event delivered after skipping the failed one');
+  assert.equal(failAttempts, 1, 'failed event was skipped, not retried');
+  const advanced = await waitUntil(async () => {
+    const m = await d.getReactionMetrics('r');
+    return m.q && m.q.checkpointSequence >= 1;
+  });
+  assert.ok(advanced, 'checkpoint advanced past the skipped event');
+  await d.close();
+});
+
 const ociSkip = process.env.DRASI_OCI_TESTS ? false : 'set DRASI_OCI_TESTS=1 to run OCI registry tests';
 
 test('OCI: list plugin tags from the public registry', { skip: ociSkip }, async () => {
