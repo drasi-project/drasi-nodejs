@@ -1,0 +1,75 @@
++++
+title = "@drasi/lib"
+linkTitle = "@drasi/lib"
+
+[[cascade]]
+type = "docs"
++++
+
+{{< blocks/cover title="Embed Drasi in your Node.js app" image_anchor="top" height="med" color="primary" >}}
+<div class="mx-auto">
+  <p class="lead mt-3">
+    <code>@drasi/lib</code> runs Drasi's continuous-query engine <strong>in-process</strong>
+    in Node.js &mdash; no servers, no brokers, no Kubernetes. Define sources and
+    reactions in plain JavaScript, or load native Drasi plugins at runtime.
+  </p>
+  <a class="btn btn-lg btn-primary me-3 mb-4" href="docs/getting-started/">
+    Get started <i class="fas fa-arrow-alt-circle-right ms-2"></i>
+  </a>
+  <a class="btn btn-lg btn-secondary me-3 mb-4" href="https://www.npmjs.com/package/@drasi/lib">
+    View on npm <i class="fab fa-npm ms-2"></i>
+  </a>
+  <p class="lead mt-3"><code>npm install @drasi/lib</code></p>
+</div>
+{{< /blocks/cover >}}
+
+{{< blocks/lead color="dark" >}}
+<p>Drasi is a <strong>change-driven</strong> data platform: you write
+<strong>continuous queries</strong> over your data, and Drasi keeps their results up
+to date as the underlying data changes &mdash; pushing you the <em>added</em>,
+<em>updated</em>, and <em>removed</em> rows.</p>
+
+<p><code>@drasi/lib</code> brings that engine directly into your Node.js process so
+you can react to change in real time from your own application code.</p>
+{{< /blocks/lead >}}
+
+{{% blocks/section color="light" type="row" %}}
+
+{{% blocks/feature icon="fas fa-plug" title="In-process, zero infrastructure" %}}
+A native ([napi-rs](https://napi.rs)) addon hosts the embeddable Drasi engine
+inside Node. Prebuilt binaries ship for Windows, Linux (x64/arm64) and
+Apple-silicon macOS — no Rust toolchain required.
+{{% /blocks/feature %}}
+
+{{% blocks/feature icon="fab fa-js" title="Sources & reactions in JavaScript" %}}
+Push graph changes from your own code with `pushChange`, and handle query result
+diffs with a plain JS callback via `addJsReaction` — no Rust, no plugins needed.
+{{% /blocks/feature %}}
+
+{{% blocks/feature icon="fas fa-cubes" title="Dynamic native plugins" %}}
+Discover and load Drasi source / reaction / bootstrap plugins at runtime, or pull
+them straight from the `ghcr.io/drasi-project` OCI registry — exactly like
+`drasi-server`.
+{{% /blocks/feature %}}
+
+{{% /blocks/section %}}
+
+{{% blocks/section color="white" type="row" %}}
+
+{{% blocks/feature icon="fas fa-code" title="First-class TypeScript" %}}
+Every config, result, and callback payload is exposed with a concrete type in the
+generated `index.d.ts`, plus a typed `DrasiErrorCode` enum for error handling.
+{{% /blocks/feature %}}
+
+{{% blocks/feature icon="fas fa-stream" title="Streaming & metrics" %}}
+Subscribe to component events and logs, and read per-query / per-reaction and
+lifecycle metrics from the running engine.
+{{% /blocks/feature %}}
+
+{{% blocks/feature icon="fas fa-book" title="Learn by example" %}}
+Start from the [Getting started](docs/getting-started/) guide, then explore the
+[end-to-end trading demo](docs/examples/trading/) that joins live prices against a
+Postgres database.
+{{% /blocks/feature %}}
+
+{{% /blocks/section %}}

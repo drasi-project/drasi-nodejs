@@ -7,6 +7,7 @@
     "type": "git",
     "url": "https://github.com/drasi-project/drasi-nodejs.git"
   },
+  "homepage": "https://drasi-project.github.io/drasi-nodejs/",
   "main": "index.js",
   "types": "index.d.ts",
   "files": [

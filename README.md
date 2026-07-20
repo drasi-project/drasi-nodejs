@@ -3,6 +3,10 @@
 [![npm version](https://img.shields.io/npm/v/@drasi/lib)](https://www.npmjs.com/package/@drasi/lib)
 [![npm downloads](https://img.shields.io/npm/dm/@drasi/lib)](https://www.npmjs.com/package/@drasi/lib)
 [![license](https://img.shields.io/npm/l/@drasi/lib)](./LICENSE)
+[![docs](https://img.shields.io/badge/docs-drasi--project.github.io-blue)](https://drasi-project.github.io/drasi-nodejs/)
+
+📖 **Documentation: <https://drasi-project.github.io/drasi-nodejs/>** — installation,
+concepts, the full API reference, guides, and an end-to-end tutorial.
 
 Embed the [Drasi](https://drasi.io) continuous-query engine directly in your
 Node.js application. `@drasi/lib` is a native ([napi-rs](https://napi.rs))
@@ -106,13 +110,17 @@ on the embedded engine.
 
 ## API overview
 
+> The full, browsable API reference lives on the
+> [documentation site](https://drasi-project.github.io/drasi-nodejs/docs/api/). The
+> summary below is a quick reference.
+
 `Drasi.create(id, options?)` → `Promise<Drasi>`. `options.secrets` seeds an
 in-memory secret store (`{ secrets: { DB_PASSWORD: '…' } }`) that cdylib plugins
 resolve `ConfigValue::Secret`/`EnvironmentVariable` references against;
 `options.stateStore` (`{ kind: 'redb', path }`) enables a persistent plugin state store.
 `Drasi.fromConfig(config)` builds **and starts** an engine from a declarative
-object (see [`docs/api-reference.md`](./docs/api-reference.md) for the full,
-method-by-method reference).
+object (see the [API reference](https://drasi-project.github.io/drasi-nodejs/docs/api/),
+or [`docs/api-reference.md`](./docs/api-reference.md) for the audit-oriented deep dive).
 
 | Area | Methods |
 | --- | --- |
