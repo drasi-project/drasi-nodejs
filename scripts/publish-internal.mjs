@@ -76,6 +76,8 @@ if (!registry) {
 
 // Guard against accidentally using this internal-only path to publish to public
 // npm (that is what `npm run publish:public` is for, with provenance intact).
+registry = registry.endsWith('/') ? registry : `${registry}/`;
+
 if (/registry\.npmjs\.org/i.test(registry)) {
   fail(
     `Refusing to run the internal publish against the public npm registry (${registry}). ` +
