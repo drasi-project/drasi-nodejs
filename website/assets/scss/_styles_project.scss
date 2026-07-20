@@ -3861,3 +3861,29 @@ pre:hover .copy-code-button {
     color: $gray-400;
   }
 }
+
+// =============================================================================
+// SITE-SPECIFIC OVERRIDES (@drasi/lib docs)
+// Additions on top of the shared Drasi theme.
+// =============================================================================
+
+// Mermaid diagrams render as an <svg> inside <pre class="mermaid">, so the dark
+// code-block background above (pre { background: #1e1e2e }) also lands on them —
+// but Mermaid draws dark edge/arrow strokes intended for a light canvas, which
+// then disappear against the dark box. Render diagrams on a light surface so the
+// nodes, arrows, and edge labels stay legible in both light and dark mode.
+pre.mermaid {
+  background-color: #ffffff !important;
+  color: initial;
+  border: 1px solid rgba($primary, 0.12) !important;
+  border-radius: $border-radius-md !important;
+  box-shadow: $shadow-sm !important;
+  padding: $spacer-lg !important;
+  text-align: center;
+
+  // Until Mermaid has swapped in the SVG, show the source centered rather than
+  // as a full-width dark code block.
+  &:not([data-processed="true"]) {
+    color: $gray-600;
+  }
+}
