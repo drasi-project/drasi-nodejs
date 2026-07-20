@@ -4,9 +4,15 @@
 # main package plus the per-platform optional-dependency packages
 # (@drasi/lib-<platform>) to npm with build provenance.
 #
-# Trigger: pushing a `vX.Y.Z` tag runs the full build matrix and then publishes.
-# `workflow_dispatch` runs the build matrix only (no publish) so maintainers can
-# validate the cross-platform builds without cutting a release.
+# Trigger: pushing a `vX.Y.Z` tag runs the full build matrix and then publishes
+# to public npm. `workflow_dispatch` runs the build matrix only (no publish) so
+# maintainers can validate the cross-platform builds without cutting a release.
+#
+# An OPTIONAL, opt-in `publish-internal` job can additionally publish the same
+# build to an Azure Artifacts npm feed for Microsoft-internal consumption. It is
+# OFF by default and never required for a public release; enable it per-run with
+# the `publish_internal` dispatch input, or on tag pushes with the repo variable
+# ENABLE_INTERNAL_PUBLISH=true. See docs/releasing.md for setup and secrets.
 #
 # Every target is built on a matching native runner (no cross-compilation). The
 # dependency tree includes C/assembly crates (e.g. aws-lc-sys) whose cross builds
@@ -22,6 +28,15 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      publish_internal:
+        description: >-
+          Also publish this build to the internal Azure Artifacts feed
+          (requires AZURE_ARTIFACTS_* secrets/vars — see docs/releasing.md).
+          Leave false for a normal build-only dispatch.
+        type: boolean
+        default: false
+        required: false
 
 concurrency:
   group: release-${{ github.ref }}
@@ -184,3 +199,98 @@ jobs:
           npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL internal publish to an Azure Artifacts npm feed.
+  #
+  # This job is OFF by default and NEVER required for a public OSS release. The
+  # public `publish` job above is unaffected by anything here. It runs only when
+  # a maintainer explicitly opts in, in one of two ways:
+  #   * manual: run the workflow via workflow_dispatch with publish_internal=true, or
+  #   * on tag pushes: set the repo/environment variable ENABLE_INTERNAL_PUBLISH=true.
+  #
+  # To enable it, configure these repo (or environment) secrets/variables — no
+  # secrets are committed to the repo:
+  #   * secret  AZURE_ARTIFACTS_TOKEN        — PAT with publish rights to the feed
+  #   * variable AZURE_ARTIFACTS_REGISTRY_URL — e.g.
+  #       https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/
+  # See docs/releasing.md ("Internal Azure Artifacts Publish") for setup.
+  publish-internal:
+    name: Publish to Azure Artifacts (internal, optional)
+    needs: build
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.publish_internal) ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && vars.ENABLE_INTERNAL_PUBLISH == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # no id-token: provenance is public-npm/OIDC only, not used here
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Create per-platform npm dirs
+        run: npx napi create-npm-dirs
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Restore loader + type declarations
+        run: cp artifacts/bindings-metadata/index.js artifacts/bindings-metadata/index.d.ts .
+
+      - name: Move binaries into per-platform packages
+        run: npx napi artifacts --output-dir artifacts --npm-dir npm
+
+      - name: Validate internal feed configuration
+        # Fail fast with a clear message if the opt-in ran without the config.
+        run: |
+          if [ -z "${AZURE_ARTIFACTS_REGISTRY_URL}" ]; then
+            echo "::error::AZURE_ARTIFACTS_REGISTRY_URL is not set. Configure it as a repo/environment variable to enable internal publishing."
+            exit 1
+          fi
+          if [ -z "${AZURE_ARTIFACTS_TOKEN}" ]; then
+            echo "::error::AZURE_ARTIFACTS_TOKEN secret is not set. Configure it to enable internal publishing."
+            exit 1
+          fi
+        env:
+          AZURE_ARTIFACTS_REGISTRY_URL: ${{ vars.AZURE_ARTIFACTS_REGISTRY_URL }}
+          AZURE_ARTIFACTS_TOKEN: ${{ secrets.AZURE_ARTIFACTS_TOKEN }}
+
+      - name: Configure Azure Artifacts auth (.npmrc)
+        # Write a project .npmrc pointing at the internal feed. The token is
+        # referenced via ${AZURE_ARTIFACTS_TOKEN} so npm substitutes it from the
+        # environment at publish time rather than writing it to disk in cleartext.
+        # NOTE: some Azure Artifacts feeds expect the legacy base64 password form
+        # (:username / :_password / :email) instead of :_authToken — adjust here
+        # if your feed rejects bearer-token auth (see docs/releasing.md).
+        run: |
+          REG="${AZURE_ARTIFACTS_REGISTRY_URL%/}/"
+          AUTHKEY="${REG#https:}"
+          {
+            echo "registry=${REG}"
+            echo "always-auth=true"
+            echo "${AUTHKEY}:_authToken=\${AZURE_ARTIFACTS_TOKEN}"
+          } > .npmrc
+        env:
+          AZURE_ARTIFACTS_REGISTRY_URL: ${{ vars.AZURE_ARTIFACTS_REGISTRY_URL }}
+
+      - name: Publish to Azure Artifacts
+        # `publish:internal` sets npm_config_registry (so the per-platform
+        # prepublish child publishes also target the feed) and disables
+        # provenance. Auth comes from the .npmrc written above.
+        run: npm run publish:internal
+        env:
+          AZURE_ARTIFACTS_REGISTRY_URL: ${{ vars.AZURE_ARTIFACTS_REGISTRY_URL }}
+          AZURE_ARTIFACTS_TOKEN: ${{ secrets.AZURE_ARTIFACTS_TOKEN }}
