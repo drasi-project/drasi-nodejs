@@ -1,0 +1,52 @@
+# Example .npmrc for OPTIONALLY publishing @drasi/lib to an INTERNAL
+# Azure Artifacts npm feed (Microsoft-internal consumption).
+#
+# This is a TEMPLATE. Copy it to a real `.npmrc`, fill in the placeholders, and
+# authenticate. The copied `.npmrc` is gitignored so it is never committed.
+#
+#   cp .npmrc.publish-internal.example .npmrc
+#
+# Public npm remains the source of truth for OSS consumers. The internal feed is
+# an OPTIONAL, additional target — see docs/releasing.md ("Dual Publish").
+#
+# Why route via .npmrc (ambient config) rather than a --registry flag:
+#   @drasi/lib publishes the main package AND several per-platform packages
+#   (@drasi/lib-<platform>). The per-platform packages are published by the
+#   `prepublishOnly` hook, whose child `npm publish` calls only read ambient
+#   npm config (this file / env), not a --registry flag on the outer publish.
+#   Setting `registry` here keeps EVERY package on the same feed.
+#   (`npm run publish:internal` sets the same config via env for you.)
+
+# Single feed URL. Azure Artifacts recommends configuring upstream sources on
+# the feed itself (so npmjs.org is reachable through this one feed) rather than
+# listing multiple registries in client config.
+# Replace ORG / PROJECT / FEED with your Azure DevOps values.
+registry=https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/
+
+# Azure Artifacts requires auth on read AND write; send credentials to the feed.
+always-auth=true
+
+# --- Authentication (DO NOT COMMIT REAL CREDENTIALS) -----------------------
+# Do NOT put tokens in this repo. Authenticate locally out of band, for example:
+#   npx vsts-npm-auth -config .npmrc          # writes creds to your USER ~/.npmrc
+# or add a per-registry auth line to your USER-level ~/.npmrc (NOT this file),
+# e.g. one of:
+#   //pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/:_authToken=${AZURE_ARTIFACTS_TOKEN}
+#   //pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/:username=ORG
+#   //pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/:_password=BASE64_PAT
+#   //pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/:email=npm@example.com
+# The exact form depends on your feed; see docs/releasing.md.
+
+# --- Scope mapping caveat (important for this scoped package) --------------
+# Every package this repo publishes is under the @drasi scope, so the default
+# `registry` above already routes them all to this feed. If you instead use a
+# scope mapping, be aware it OVERRIDES the default `registry` for ALL @drasi/*
+# packages (installs too) and can silently reroute a later PUBLIC publish to
+# this internal feed. Prefer the plain `registry=` key above and remove any
+# stray `.npmrc` before a public release.
+#
+# @drasi:registry=https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/
+
+# NOTE: npm provenance is only supported on the public npm registry (via OIDC),
+# so it must be OFF for this feed. `npm run publish:internal` disables it; if you
+# publish by hand, add `provenance=false` or pass `--provenance=false`.

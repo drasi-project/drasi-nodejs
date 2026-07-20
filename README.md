@@ -257,6 +257,29 @@ Adoption is tracked via npm downloads and dependents. See
 npm downloads API, npmjs.com Insights/dependents, and third-party dashboards —
 plus the baseline and where to record targets.
 
+## Publishing
+
+`@drasi/lib` is published to **public npm** as the source of truth for
+open-source consumers:
+
+```bash
+npm run pack:verify     # inspect the tarball contents (npm pack --dry-run)
+npm run publish:public  # npm publish --access public (normally done by CI on a vX.Y.Z tag)
+```
+
+Maintainers can **optionally** also publish the same version to an internal
+**Azure Artifacts** feed for Microsoft-internal consumption (e.g. to avoid the
+~7-day quarantine delay for newly published public versions on corp-managed
+machines). This is additive and never required for an OSS release:
+
+```bash
+AZURE_ARTIFACTS_REGISTRY_URL=<feed-url> npm run publish:internal
+```
+
+No credentials are committed — authenticate with your normal npm / Azure
+Artifacts auth. See [`docs/releasing.md`](./docs/releasing.md) for the full
+dual-publish model, the `.npmrc` templates, CI setup, and the release runbook.
+
 ## License
 
 Licensed under the Apache License, Version 2.0 — see [LICENSE](./LICENSE).
