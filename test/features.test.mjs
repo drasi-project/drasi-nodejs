@@ -90,6 +90,8 @@ test('config schema accessors throw a typed error for unknown kinds', async () =
     [() => d.sourceConfigSchema('nope'), 'UNKNOWN_SOURCE_KIND'],
     [() => d.reactionConfigSchema('nope'), 'UNKNOWN_REACTION_KIND'],
     [() => d.bootstrapConfigSchema('nope'), 'UNKNOWN_BOOTSTRAP_KIND'],
+    [() => d.secretStoreConfigSchema('nope'), 'UNKNOWN_SECRET_STORE_KIND'],
+    [() => d.identityProviderConfigSchema('nope'), 'UNKNOWN_IDENTITY_PROVIDER_KIND'],
   ];
   for (const [fn, code] of cases) {
     assert.throws(fn, (err) => {
@@ -97,6 +99,14 @@ test('config schema accessors throw a typed error for unknown kinds', async () =
       return true;
     });
   }
+  // useSecretStore with an unknown kind also rejects with the typed code token.
+  await assert.rejects(
+    () => d.useSecretStore('nope'),
+    (err) => {
+      assert.match(err.message, /\[UNKNOWN_SECRET_STORE_KIND\]/);
+      return true;
+    },
+  );
   await d.close();
 });
 

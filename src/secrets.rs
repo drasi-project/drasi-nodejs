@@ -16,14 +16,49 @@
 //! has to `block_on` the host runtime.
 
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
+use async_trait::async_trait;
 use drasi_host_sdk::{ConfigResolverFn, SecretStoreValueResolverAdapter};
 use drasi_lib::secret_store::SecretStoreProvider;
 use drasi_plugin_sdk::ffi::secret_store::FfiGetSecretResult;
 use drasi_plugin_sdk::ffi::FfiStr;
 use drasi_plugin_sdk::resolver::{EnvironmentVariableResolver, ValueResolver};
 use drasi_plugin_sdk::ConfigValue as SdkConfigValue;
+
+// ============================================================================
+// SwappableSecretStoreProvider — live-replaceable wrapper
+// ============================================================================
+
+/// A [`SecretStoreProvider`] that delegates to a runtime-swappable inner
+/// provider.
+///
+/// The resolver thread started by [`build_config_resolver_context`] receives
+/// an `Arc<SwappableSecretStoreProvider>`. Because it calls `get_secret` through
+/// this wrapper on every request, replacing the inner provider (via writing to
+/// `inner`) immediately affects all subsequent resolutions — no restart of the
+/// resolver thread is needed.
+///
+/// This is the mechanism behind `Drasi.useSecretStore`: it creates a new
+/// `SecretStoreProvider` from the selected plugin and writes to the shared
+/// `inner` `RwLock` that was handed to the resolver thread at startup.
+pub struct SwappableSecretStoreProvider {
+    pub inner: Arc<RwLock<Arc<dyn SecretStoreProvider>>>,
+}
+
+#[async_trait]
+impl SecretStoreProvider for SwappableSecretStoreProvider {
+    async fn get_secret(&self, name: &str) -> anyhow::Result<String> {
+        // Clone the Arc under the read-lock to avoid holding the lock across the
+        // async call.
+        let provider = self
+            .inner
+            .read()
+            .expect("SwappableSecretStoreProvider lock poisoned")
+            .clone();
+        provider.get_secret(name).await
+    }
+}
 
 /// Context passed to the host config resolver callback. Holds a channel to a
 /// dedicated resolver thread that owns the SDK resolvers.

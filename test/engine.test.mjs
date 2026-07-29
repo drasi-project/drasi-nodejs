@@ -47,9 +47,15 @@ test('discovers and loads cdylib plugins', async () => {
   const d = await Drasi.create('t-load');
   const summary = await d.loadPlugins(pluginsDir);
   assert.ok(summary.plugins >= 2, `expected >=2 plugins, got ${summary.plugins}`);
+  // All five plugin-type counts must be present (even if zero for some).
+  assert.equal(typeof summary.secretStores, 'number', 'secretStores count is a number');
+  assert.equal(typeof summary.identityProviders, 'number', 'identityProviders count is a number');
   const kinds = d.pluginKinds();
   assert.ok(kinds.sources.includes('mock'), 'mock source registered');
   assert.ok(kinds.reactions.includes('log'), 'log reaction registered');
+  // pluginKinds returns all five collections.
+  assert.ok(Array.isArray(kinds.secretStores), 'secretStores is an array');
+  assert.ok(Array.isArray(kinds.identityProviders), 'identityProviders is an array');
   await d.stop();
 });
 
