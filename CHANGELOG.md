@@ -9,6 +9,8 @@ release process.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-30
+
 ### Added
 
 - **Source middleware for query writers** — `addQuery`/`updateQuery` gain a trailing
@@ -122,7 +124,8 @@ release process.
   packages with npm build provenance (OIDC-first, `NPM_TOKEN` fallback).
 - Maintainer release guide (`docs/releasing.md`) and this changelog.
 
-[Unreleased]: https://github.com/drasi-project/drasi-nodejs/compare/v0.2.0...main
+[Unreleased]: https://github.com/drasi-project/drasi-nodejs/compare/v0.2.1...main
+[0.2.1]: https://github.com/drasi-project/drasi-nodejs/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/drasi-project/drasi-nodejs/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/drasi-project/drasi-nodejs/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/drasi-project/drasi-nodejs/releases/tag/v0.1.0
