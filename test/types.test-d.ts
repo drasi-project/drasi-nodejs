@@ -20,11 +20,13 @@ import type {
   PullPluginResult,
   QueryJoin,
   QueryMetrics,
+  QueryMiddleware,
   QueryResultEvent,
   ReactionQueryMetrics,
   ResultDiff,
   SourceChangeInput,
   SourceSchema,
+  SourceSubscription,
   GraphSchema,
   StateStoreOptions,
 } from '../index.js'
@@ -54,7 +56,21 @@ async function construction(): Promise<void> {
         bootstrap: { kind: 'mock-bootstrap', config: {} },
       },
     ],
-    queries: [{ id: 'q', query: 'MATCH (n) RETURN n', sources: ['s'], language: 'cypher' }],
+    queries: [
+      { id: 'q', query: 'MATCH (n) RETURN n', sources: ['s'], language: 'cypher' },
+      {
+        id: 'q-mw',
+        query: 'MATCH (p:Person) RETURN p.id AS id',
+        sources: [{ id: 's', pipeline: ['promote-user'] } satisfies SourceSubscription],
+        middleware: [
+          {
+            kind: 'promote',
+            name: 'promote-user',
+            config: { mappings: [{ path: '$.user.id', target_name: 'id' }] },
+          } satisfies QueryMiddleware,
+        ],
+      },
+    ],
     reactions: [{ kind: 'log', id: 'r', queries: ['q'], config: {} }],
   }
   const d2: Drasi = await Drasi.fromConfig(cfg)
@@ -117,6 +133,15 @@ async function queries(d: Drasi): Promise<void> {
   const join: QueryJoin = { id: 'REL', keys: [{ label: 'a', property: 'k' }] }
   await d.addQuery('q', 'MATCH (n) RETURN n', ['s'], 'gql', [join])
   await d.updateQuery('q', 'MATCH (n) RETURN n', ['s'])
+  // Sources accept `string | SourceSubscription`; middleware is a trailing arg.
+  const sub: SourceSubscription = { id: 's', pipeline: ['promote-user'] }
+  const mw: QueryMiddleware = {
+    kind: 'promote',
+    name: 'promote-user',
+    config: { mappings: [{ path: '$.user.id', target_name: 'id' }] },
+  }
+  await d.addQuery('q-mw', 'MATCH (p:Person) RETURN p.id AS id', [sub], 'cypher', undefined, [mw])
+  await d.updateQuery('q-mw', 'MATCH (p:Person) RETURN p.id AS id', ['s', sub], undefined, undefined, [mw])
   const rows: Array<Record<string, unknown>> = await d.getQueryResults('q')
   void rows
   const list: ComponentStatusEntry[] = await d.listQueries()
@@ -182,6 +207,9 @@ function classify(err: unknown): string {
   if (code === DrasiErrorCode.UnknownSourceKind) return 'unknown-source'
   if (code === DrasiErrorCode.NoJsSource) return 'no-js-source'
   if (code === DrasiErrorCode.ChangeOpRequired) return 'bad-change'
+  if (code === DrasiErrorCode.UnknownMiddlewareRef) return 'unknown-middleware'
+  if (code === DrasiErrorCode.MiddlewareInvalid) return 'bad-middleware'
+  if (code === DrasiErrorCode.QuerySourceInvalid) return 'bad-source'
   return 'other'
 }
 

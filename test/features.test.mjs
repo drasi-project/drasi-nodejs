@@ -343,3 +343,107 @@ test('getGraphSchema merges sources with query references', async () => {
   assert.ok(Array.isArray(graph.sourcesWithoutSchema), 'sourcesWithoutSchema is an array');
   await d.close();
 });
+
+// ---------------------------------------------------------------------------
+// Source middleware exposed to query writers: query `middleware` definitions +
+// per-source `pipeline` subscriptions. Uses the compiled-in `relabel` middleware
+// (pure Rust, deterministic) which rewrites a node's label before it reaches the
+// query — so a query on the rewritten label only ever matches when the pipeline
+// ran.
+// ---------------------------------------------------------------------------
+
+const relabelMiddleware = [
+  { kind: 'relabel', name: 'raw-to-person', config: { labelMappings: { Raw: 'Person' } } },
+];
+const rawNode = { op: 'insert', id: 'p1', labels: ['Raw'], properties: { name: 'alice' } };
+
+test('a source pipeline runs middleware before changes reach the query', async () => {
+  const d = await Drasi.create('t-mw-pipeline');
+  await d.start();
+  await d.addJsSource('people');
+  await d.addQuery(
+    'q',
+    'MATCH (p:Person) RETURN p.name AS name',
+    [{ id: 'people', pipeline: ['raw-to-person'] }],
+    'cypher',
+    undefined,
+    relabelMiddleware,
+  );
+  await d.pushChange('people', rawNode);
+  const ok = await waitUntil(async () => (await d.getQueryResults('q')).some((r) => r.name === 'alice'));
+  assert.ok(ok, 'relabel middleware rewrote Raw -> Person so the query matched');
+  await d.close();
+});
+
+test('without a pipeline the label is not rewritten (control)', async () => {
+  const d = await Drasi.create('t-mw-control');
+  await d.start();
+  await d.addJsSource('people');
+  // Same source data, but no pipeline/middleware — the node stays a `Raw`, so a
+  // `Person` query must never match.
+  await d.addQuery('q', 'MATCH (p:Person) RETURN p.name AS name', ['people']);
+  await d.pushChange('people', rawNode);
+  // Give the change time to flow through so a (wrong) match would surface.
+  await sleep(500);
+  const results = await d.getQueryResults('q');
+  assert.equal(results.length, 0, `no middleware means the label is not rewritten (got ${JSON.stringify(results)})`);
+  await d.close();
+});
+
+test('fromConfig wires query middleware and source pipelines', async () => {
+  // fromConfig can only declare cdylib sources, so relabel the mock source's
+  // `Counter` nodes to `Gauge` and query the rewritten label.
+  const d = await Drasi.fromConfig({
+    id: 't-mw-fromconfig',
+    pluginsDir,
+    sources: [{ kind: 'mock', id: 'src', config: { dataType: { type: 'counter' }, intervalMs: 100 } }],
+    queries: [
+      {
+        id: 'q',
+        query: 'MATCH (g:Gauge) RETURN g.value AS value',
+        sources: [{ id: 'src', pipeline: ['counter-to-gauge'] }],
+        middleware: [
+          { kind: 'relabel', name: 'counter-to-gauge', config: { labelMappings: { Counter: 'Gauge' } } },
+        ],
+      },
+    ],
+  });
+  const ok = await waitUntil(async () => (await d.getQueryResults('q')).length > 0);
+  assert.ok(ok, 'fromConfig middleware pipeline relabeled Counter -> Gauge');
+  await d.close();
+});
+
+test('updateQuery can add a middleware pipeline to an existing query', async () => {
+  const d = await Drasi.create('t-mw-update');
+  await d.start();
+  await d.addJsSource('people');
+  await d.addQuery('q', 'MATCH (p:Person) RETURN p.name AS name', ['people']);
+  // The query auto-starts asynchronously on a running engine; wait until it has
+  // finished starting, otherwise the reconfigure is rejected with "Cannot
+  // reconfigure component 'q' while it is starting".
+  await waitUntil(async () => (await d.listQueries()).some((q) => q.id === 'q' && q.status === 'Running'));
+  // Replace the definition to add the relabel middleware + pipeline.
+  await d.updateQuery(
+    'q',
+    'MATCH (p:Person) RETURN p.name AS name',
+    [{ id: 'people', pipeline: ['raw-to-person'] }],
+    'cypher',
+    undefined,
+    relabelMiddleware,
+  );
+  await d.pushChange('people', rawNode);
+  const ok = await waitUntil(async () => (await d.getQueryResults('q')).some((r) => r.name === 'alice'));
+  assert.ok(ok, 'updateQuery added a working middleware pipeline');
+  await d.close();
+});
+
+test('bare string sources still work (backward compatibility)', async () => {
+  const d = await Drasi.create('t-mw-compat-strings');
+  await d.start();
+  await d.addJsSource('people');
+  await d.addQuery('q', 'MATCH (p:Person) RETURN p.name AS name', ['people']);
+  await d.pushChange('people', { op: 'insert', id: 'p1', labels: ['Person'], properties: { name: 'alice' } });
+  const ok = await waitUntil(async () => (await d.getQueryResults('q')).some((r) => r.name === 'alice'));
+  assert.ok(ok, 'string-only sources remain supported');
+  await d.close();
+});
