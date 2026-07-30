@@ -1603,8 +1603,10 @@ async fn build_engine(
     // Identity provider for credential injection into sources/reactions (gap G8).
     if let Some(identity) = params.identity {
         builder = builder.with_identity_provider(build_identity_provider(identity));
+    }
     let core = builder.build().await.map_err(to_napi)?;
     let active_secret_provider = Arc::new(RwLock::new(provider));
+    Ok(Drasi {
         inner: Arc::new(Inner {
             drasi: Arc::new(core),
             sources: Mutex::new(HashMap::new()),

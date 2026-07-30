@@ -56,6 +56,7 @@ impl SecretStoreProvider for SwappableSecretStoreProvider {
             Err(poisoned) => poisoned.into_inner().clone(),
         };
         provider.get_secret(name).await
+    }
 }
 
 /// Context passed to the host config resolver callback. Holds a channel to a
