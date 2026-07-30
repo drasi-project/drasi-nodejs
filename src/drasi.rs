@@ -10,7 +10,7 @@
 //! cdylib plugins, and supports JavaScript-defined sources and reactions.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use napi::bindgen_prelude::PromiseRaw;
 use napi::Env;
@@ -29,13 +29,18 @@ use drasi_lib::identity::{
 };
 use drasi_lib::{DrasiLib, MemorySecretStoreProvider, Query};
 use drasi_plugin_sdk::{
-    BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
+    BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
+    SourcePluginDescriptor,
 };
+use drasi_plugin_sdk::prelude::SecretStorePluginDescriptor;
 
 use crate::components::{JsDurableResultFn, JsReaction, JsResultFn, JsSource};
 use crate::conversions::{json_to_source_change, plugin_config_schema, resolve_query_language};
 use crate::error::{coded_message, throw_coded, to_napi, CodedReason, DrasiErrorCode};
-use crate::secrets::{build_config_resolver_context, config_resolver_callback, ConfigResolverContext};
+use crate::secrets::{
+    build_config_resolver_context, config_resolver_callback, ConfigResolverContext,
+    SwappableSecretStoreProvider,
+};
 use crate::verification::{verification_decision, verification_to_json};
 
 /// File patterns for discovering cdylib plugins (Unix + Windows naming).
@@ -60,6 +65,8 @@ struct PluginFileKinds {
     sources: Vec<String>,
     reactions: Vec<String>,
     bootstrap: Vec<String>,
+    secret_stores: Vec<String>,
+    identity_providers: Vec<String>,
 }
 
 /// Shared, interior-mutable state behind the JS `Drasi` object.
@@ -68,13 +75,19 @@ struct Inner {
     sources: Mutex<HashMap<String, Arc<dyn SourcePluginDescriptor>>>,
     reactions: Mutex<HashMap<String, Arc<dyn ReactionPluginDescriptor>>>,
     bootstrap: Mutex<HashMap<String, Arc<dyn BootstrapPluginDescriptor>>>,
+    secret_stores: Mutex<HashMap<String, Arc<dyn SecretStorePluginDescriptor>>>,
+    identity_providers: Mutex<HashMap<String, Arc<dyn IdentityProviderPluginDescriptor>>>,
     js_source_senders: Mutex<HashMap<String, mpsc::Sender<SourceChange>>>,
     watchers: Mutex<Vec<PluginWatcher>>,
     /// Maps a plugin file path to the kinds it registered (for watcher removal).
     plugin_files: Mutex<HashMap<String, PluginFileKinds>>,
-    /// Secret store provider, retained so the plugin contexts below can be built
-    /// lazily on first plugin load rather than eagerly for every instance.
-    secret_provider: Arc<dyn SecretStoreProvider>,
+    /// The active secret store provider, swappable at runtime via `useSecretStore`.
+    ///
+    /// Starts as the in-memory store seeded from `create`/`fromConfig` options.
+    /// `useSecretStore` replaces the inner `Arc` so the resolver thread, which
+    /// holds an `Arc<SwappableSecretStoreProvider>` pointing at the same
+    /// `RwLock`, picks up the new provider on its next request.
+    active_secret_provider: Arc<RwLock<Arc<dyn SecretStoreProvider>>>,
     /// This engine instance's id, used when lazily building the callback context.
     instance_id: String,
     /// Whether a durable (disk-backed) state store is configured — required for
@@ -105,8 +118,14 @@ impl Inner {
     /// on drop/close via [`Inner::shutdown_config_resolver`].
     fn ensure_plugin_contexts(&self) -> (usize, usize) {
         let resolver_ctx = *self.resolver_ctx.get_or_init(|| {
+            // Wrap active_secret_provider in a SwappableSecretStoreProvider so
+            // the resolver thread automatically uses whatever provider is current
+            // when useSecretStore later replaces the inner Arc.
+            let swappable = SwappableSecretStoreProvider {
+                inner: self.active_secret_provider.clone(),
+            };
             build_config_resolver_context(
-                self.secret_provider.clone(),
+                Arc::new(swappable),
                 tokio::runtime::Handle::current(),
             ) as usize
         });
@@ -343,7 +362,8 @@ impl Drasi {
     // ------------------------------------------------------------------
 
     /// Discover and load all cdylib plugins from `dir`, registering their
-    /// descriptors. Returns `{ plugins, sources, reactions, bootstrap }`.
+    /// descriptors. Returns `{ plugins, sources, reactions, bootstrap,
+    /// secretStores, identityProviders }`.
     ///
     /// When `verify` is provided as `{ filename: sha256hex }`, only plugin files
     /// whose contents hash to the expected value are loaded (an integrity allowlist).
@@ -359,13 +379,15 @@ impl Drasi {
                     .collect()
             })
         });
-        let (plugins, sources, reactions, bootstrap) =
+        let (plugins, sources, reactions, bootstrap, secret_stores, identity_providers) =
             load_dir_into(&self.inner, &dir, verify_map.as_ref()).map_err(to_napi)?;
         Ok(serde_json::json!({
             "plugins": plugins,
             "sources": sources,
             "reactions": reactions,
             "bootstrap": bootstrap,
+            "secretStores": secret_stores,
+            "identityProviders": identity_providers,
         }))
     }
 
@@ -402,6 +424,12 @@ impl Drasi {
                             }
                             for k in &rec.bootstrap {
                                 inner.bootstrap.lock().unwrap().remove(k);
+                            }
+                            for k in &rec.secret_stores {
+                                inner.secret_stores.lock().unwrap().remove(k);
+                            }
+                            for k in &rec.identity_providers {
+                                inner.identity_providers.lock().unwrap().remove(k);
                             }
                             log::info!(
                                 "plugin removed; deregistered its kinds (the cdylib stays mapped): {key}"
@@ -524,7 +552,8 @@ impl Drasi {
         }))
     }
 
-    /// Return the registered plugin kinds: `{ sources, reactions, bootstrap }`.
+    /// Return the registered plugin kinds: `{ sources, reactions, bootstrap,
+    /// secretStores, identityProviders }`.
     #[napi(ts_return_type = "PluginKinds")]
     pub fn plugin_kinds(&self) -> Value {
         let sources: Vec<String> = self.inner.sources.lock().unwrap().keys().cloned().collect();
@@ -532,10 +561,16 @@ impl Drasi {
             self.inner.reactions.lock().unwrap().keys().cloned().collect();
         let bootstrap: Vec<String> =
             self.inner.bootstrap.lock().unwrap().keys().cloned().collect();
+        let secret_stores: Vec<String> =
+            self.inner.secret_stores.lock().unwrap().keys().cloned().collect();
+        let identity_providers: Vec<String> =
+            self.inner.identity_providers.lock().unwrap().keys().cloned().collect();
         serde_json::json!({
             "sources": sources,
             "reactions": reactions,
             "bootstrap": bootstrap,
+            "secretStores": secret_stores,
+            "identityProviders": identity_providers,
         })
     }
 
@@ -585,6 +620,105 @@ impl Drasi {
             descriptor.config_schema_name(),
             &descriptor.config_schema_json(),
         ))
+    }
+
+    /// Return the config schema advertised by a registered **secret store** plugin
+    /// kind as `{ name, schema }`. Throws a typed `UNKNOWN_SECRET_STORE_KIND`
+    /// error if the kind is not registered.
+    #[napi(ts_return_type = "PluginConfigSchema")]
+    pub fn secret_store_config_schema(&self, env: &Env, kind: String) -> napi::Result<Value> {
+        let descriptor = {
+            self.inner.secret_stores.lock().unwrap().get(&kind).cloned()
+        }
+        .ok_or_else(|| {
+            throw_coded(
+                env,
+                DrasiErrorCode::UnknownSecretStoreKind,
+                format!("unknown secret store kind '{kind}'"),
+            )
+        })?;
+        Ok(plugin_config_schema(
+            descriptor.config_schema_name(),
+            &descriptor.config_schema_json(),
+        ))
+    }
+
+    /// Return the config schema advertised by a registered **identity provider**
+    /// plugin kind as `{ name, schema }`. Throws a typed
+    /// `UNKNOWN_IDENTITY_PROVIDER_KIND` error if the kind is not registered.
+    #[napi(ts_return_type = "PluginConfigSchema")]
+    pub fn identity_provider_config_schema(
+        &self,
+        env: &Env,
+        kind: String,
+    ) -> napi::Result<Value> {
+        let descriptor = {
+            self.inner
+                .identity_providers
+                .lock()
+                .unwrap()
+                .get(&kind)
+                .cloned()
+        }
+        .ok_or_else(|| {
+            throw_coded(
+                env,
+                DrasiErrorCode::UnknownIdentityProviderKind,
+                format!("unknown identity provider kind '{kind}'"),
+            )
+        })?;
+        Ok(plugin_config_schema(
+            descriptor.config_schema_name(),
+            &descriptor.config_schema_json(),
+        ))
+    }
+
+    /// Activate a plugin-provided secret store.
+    ///
+    /// Creates a [`SecretStoreProvider`] from the registered plugin `kind` with
+    /// the given `config` and replaces the active store used by the config
+    /// resolver. Subsequent `ConfigValue::Secret` references in plugin configs
+    /// resolve through the new store.
+    ///
+    /// Must be called after `loadPlugins` has registered the plugin and before
+    /// any component whose config references a `Secret` value is started.
+    /// Throws a typed `UNKNOWN_SECRET_STORE_KIND` error if the kind is not
+    /// registered.
+    #[napi(
+        ts_args_type = "kind: string, config?: Record<string, unknown>",
+    )]
+    pub async fn use_secret_store(
+        &self,
+        kind: String,
+        config: Option<Value>,
+    ) -> napi::Result<()> {
+        let config = config.unwrap_or_else(|| Value::Object(Default::default()));
+        let descriptor = {
+            self.inner.secret_stores.lock().unwrap().get(&kind).cloned()
+        }
+        .ok_or_else(|| {
+            coded_message(
+                DrasiErrorCode::UnknownSecretStoreKind,
+                format!("unknown secret store kind '{kind}'"),
+            )
+        })?;
+
+        let provider: Box<dyn SecretStoreProvider> = descriptor
+            .create_secret_store(&config)
+            .await
+            .map_err(|e| {
+                coded_message(DrasiErrorCode::ConfigInvalid, e.to_string())
+            })?;
+
+        // Swap the active provider. The resolver thread picks up the new
+        // provider on its next request because SwappableSecretStoreProvider
+        // reads through the same RwLock.
+        *self
+            .inner
+            .active_secret_provider
+            .write()
+            .expect("active_secret_provider lock poisoned") = Arc::from(provider);
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -1497,16 +1631,19 @@ async fn build_engine(
         builder = builder.with_identity_provider(build_identity_provider(identity));
     }
     let core = builder.build().await.map_err(to_napi)?;
+    let active_secret_provider = Arc::new(RwLock::new(provider));
     Ok(Drasi {
         inner: Arc::new(Inner {
             drasi: Arc::new(core),
             sources: Mutex::new(HashMap::new()),
             reactions: Mutex::new(HashMap::new()),
             bootstrap: Mutex::new(HashMap::new()),
+            secret_stores: Mutex::new(HashMap::new()),
+            identity_providers: Mutex::new(HashMap::new()),
             js_source_senders: Mutex::new(HashMap::new()),
             watchers: Mutex::new(Vec::new()),
             plugin_files: Mutex::new(HashMap::new()),
-            secret_provider: provider,
+            active_secret_provider,
             instance_id: id,
             has_durable_state_store,
             resolver_ctx: OnceLock::new(),
@@ -1784,7 +1921,8 @@ fn build_query_def(
 }
 
 /// Scan `dir` for cdylib plugins and register their descriptors into `inner`.
-/// Returns `(plugins, sources, reactions, bootstrap)` counts.
+/// Returns `(plugins, sources, reactions, bootstrap, secret_stores,
+/// identity_providers)` counts.
 ///
 /// When `verify` is `Some(map)` of `filename -> sha256hex`, only files whose
 /// contents hash to the expected value are loaded.
@@ -1792,7 +1930,7 @@ fn load_dir_into(
     inner: &Inner,
     dir: &str,
     verify: Option<&HashMap<String, String>>,
-) -> anyhow::Result<(usize, usize, usize, usize)> {
+) -> anyhow::Result<(usize, usize, usize, usize, usize, usize)> {
     let file_patterns: Vec<String> = if let Some(expected) = verify {
         // Build an allowlist of exact filenames whose hash matches.
         let mut allow = Vec::new();
@@ -1832,7 +1970,8 @@ fn load_dir_into(
         callbacks::default_lifecycle_callback_fn(),
     )?;
 
-    let (mut plugins, mut sources, mut reactions, mut bootstrap) = (0, 0, 0, 0);
+    let (mut plugins, mut sources, mut reactions, mut bootstrap, mut secret_stores, mut identity_providers) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
 
     for mut plugin in loaded {
         plugins += 1;
@@ -1862,12 +2001,24 @@ fn load_dir_into(
             inner.bootstrap.lock().unwrap().insert(kind, Arc::new(proxy));
             bootstrap += 1;
         }
+        for proxy in std::mem::take(&mut plugin.secret_store_plugins) {
+            let kind = proxy.kind().to_string();
+            rec.secret_stores.push(kind.clone());
+            inner.secret_stores.lock().unwrap().insert(kind, Arc::new(proxy));
+            secret_stores += 1;
+        }
+        for proxy in std::mem::take(&mut plugin.identity_provider_plugins) {
+            let kind = proxy.kind().to_string();
+            rec.identity_providers.push(kind.clone());
+            inner.identity_providers.lock().unwrap().insert(kind, Arc::new(proxy));
+            identity_providers += 1;
+        }
         inner.plugin_files.lock().unwrap().insert(file, rec);
         // `plugin` (LoadedPlugin) drops here, intentionally leaking the
         // underlying library so the cdylib stays mapped for the process.
     }
 
-    Ok((plugins, sources, reactions, bootstrap))
+    Ok((plugins, sources, reactions, bootstrap, secret_stores, identity_providers))
 }
 
 /// Spawn a task that forwards a stream of `ComponentEvent`s to a JS callback.

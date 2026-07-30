@@ -216,6 +216,8 @@ pub struct LoadPluginsResult {
     pub sources: f64,
     pub reactions: f64,
     pub bootstrap: f64,
+    pub secret_stores: f64,
+    pub identity_providers: f64,
 }
 
 /// The registered plugin kinds returned by `pluginKinds`.
@@ -224,6 +226,8 @@ pub struct PluginKinds {
     pub sources: Vec<String>,
     pub reactions: Vec<String>,
     pub bootstrap: Vec<String>,
+    pub secret_stores: Vec<String>,
+    pub identity_providers: Vec<String>,
 }
 
 /// A plugin kind's declared config schema (audit gap G9), returned by

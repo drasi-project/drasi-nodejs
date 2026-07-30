@@ -81,10 +81,15 @@ async function construction(): Promise<void> {
 async function plugins(d: Drasi): Promise<void> {
   const loaded: LoadPluginsResult = await d.loadPlugins('./plugins', { 'libx.so': 'deadbeef' })
   const total: number = loaded.plugins + loaded.sources + loaded.reactions + loaded.bootstrap
+    + loaded.secretStores + loaded.identityProviders
   void total
   const kinds: PluginKinds = d.pluginKinds()
   const firstSource: string | undefined = kinds.sources[0]
   void firstSource
+  const firstSecretStore: string | undefined = kinds.secretStores[0]
+  void firstSecretStore
+  const firstIdProvider: string | undefined = kinds.identityProviders[0]
+  void firstIdProvider
   const tags: string[] = await d.listPluginTags('source/postgres')
   void tags
   const pulled: PullPluginResult = await d.pullPlugin('ref:tag', './plugins', 'x.so')
@@ -109,6 +114,12 @@ async function plugins(d: Drasi): Promise<void> {
   void rxnSchema.name
   const bsSchema: PluginConfigSchema = d.bootstrapConfigSchema('bs')
   void bsSchema.name
+  const ssSchema: PluginConfigSchema = d.secretStoreConfigSchema('file')
+  void ssSchema.name
+  const ipSchema: PluginConfigSchema = d.identityProviderConfigSchema('entra')
+  void ipSchema.name
+  await d.useSecretStore('file', { path: '/etc/secrets.json' })
+  await d.useSecretStore('file')
 }
 
 async function sources(d: Drasi): Promise<void> {
