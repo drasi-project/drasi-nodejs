@@ -51,13 +51,11 @@ impl SecretStoreProvider for SwappableSecretStoreProvider {
     async fn get_secret(&self, name: &str) -> anyhow::Result<String> {
         // Clone the Arc under the read-lock to avoid holding the lock across the
         // async call.
-        let provider = self
-            .inner
-            .read()
-            .expect("SwappableSecretStoreProvider lock poisoned")
-            .clone();
+        let provider = match self.inner.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
         provider.get_secret(name).await
-    }
 }
 
 /// Context passed to the host config resolver callback. Holds a channel to a
