@@ -1,0 +1,28 @@
+# Example .npmrc for publishing @drasi/lib to the PUBLIC npm registry.
+#
+# This is a TEMPLATE. Copy it to a real `.npmrc` only if you need to pin the
+# registry locally; the copied `.npmrc` is gitignored so it is never committed.
+# You usually do NOT need this file at all — with no `.npmrc` present, npm
+# already defaults to the public registry, which is what CI uses.
+#
+#   cp .npmrc.publish-public.example .npmrc
+#
+# Public npm is the source of truth for open-source consumers. Prefer the
+# explicit script instead of relying on ambient config:
+#
+#   npm run publish:public
+#
+# Do NOT commit credentials. Authenticate with `npm login` or, in CI, an
+# NPM_TOKEN secret / OIDC trusted publishing (see docs/releasing.md).
+
+# Default registry for every package published from this repo (the main
+# @drasi/lib package and the per-platform @drasi/lib-<platform> packages).
+registry=https://registry.npmjs.org/
+
+# --- Scope mapping caveat (important for this scoped package) --------------
+# Every package this repo publishes is under the @drasi scope. A scope-specific
+# mapping like the line below would OVERRIDE the default `registry` above for
+# ALL @drasi/* packages — including public releases — and can silently reroute
+# a publish to the wrong feed. Leave it commented for public publishing.
+#
+# @drasi:registry=https://registry.npmjs.org/

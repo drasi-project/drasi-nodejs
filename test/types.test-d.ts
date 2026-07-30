@@ -20,10 +20,14 @@ import type {
   PullPluginResult,
   QueryJoin,
   QueryMetrics,
+  QueryMiddleware,
   QueryResultEvent,
   ReactionQueryMetrics,
   ResultDiff,
   SourceChangeInput,
+  SourceSchema,
+  SourceSubscription,
+  GraphSchema,
   StateStoreOptions,
 } from '../index.js'
 
@@ -52,7 +56,21 @@ async function construction(): Promise<void> {
         bootstrap: { kind: 'mock-bootstrap', config: {} },
       },
     ],
-    queries: [{ id: 'q', query: 'MATCH (n) RETURN n', sources: ['s'], language: 'cypher' }],
+    queries: [
+      { id: 'q', query: 'MATCH (n) RETURN n', sources: ['s'], language: 'cypher' },
+      {
+        id: 'q-mw',
+        query: 'MATCH (p:Person) RETURN p.id AS id',
+        sources: [{ id: 's', pipeline: ['promote-user'] } satisfies SourceSubscription],
+        middleware: [
+          {
+            kind: 'promote',
+            name: 'promote-user',
+            config: { mappings: [{ path: '$.user.id', target_name: 'id' }] },
+          } satisfies QueryMiddleware,
+        ],
+      },
+    ],
     reactions: [{ kind: 'log', id: 'r', queries: ['q'], config: {} }],
   }
   const d2: Drasi = await Drasi.fromConfig(cfg)
@@ -63,10 +81,15 @@ async function construction(): Promise<void> {
 async function plugins(d: Drasi): Promise<void> {
   const loaded: LoadPluginsResult = await d.loadPlugins('./plugins', { 'libx.so': 'deadbeef' })
   const total: number = loaded.plugins + loaded.sources + loaded.reactions + loaded.bootstrap
+    + loaded.secretStores + loaded.identityProviders
   void total
   const kinds: PluginKinds = d.pluginKinds()
   const firstSource: string | undefined = kinds.sources[0]
   void firstSource
+  const firstSecretStore: string | undefined = kinds.secretStores[0]
+  void firstSecretStore
+  const firstIdProvider: string | undefined = kinds.identityProviders[0]
+  void firstIdProvider
   const tags: string[] = await d.listPluginTags('source/postgres')
   void tags
   const pulled: PullPluginResult = await d.pullPlugin('ref:tag', './plugins', 'x.so')
@@ -91,6 +114,12 @@ async function plugins(d: Drasi): Promise<void> {
   void rxnSchema.name
   const bsSchema: PluginConfigSchema = d.bootstrapConfigSchema('bs')
   void bsSchema.name
+  const ssSchema: PluginConfigSchema = d.secretStoreConfigSchema('file')
+  void ssSchema.name
+  const ipSchema: PluginConfigSchema = d.identityProviderConfigSchema('entra')
+  void ipSchema.name
+  await d.useSecretStore('file', { path: '/etc/secrets.json' })
+  await d.useSecretStore('file')
 }
 
 async function sources(d: Drasi): Promise<void> {
@@ -115,6 +144,15 @@ async function queries(d: Drasi): Promise<void> {
   const join: QueryJoin = { id: 'REL', keys: [{ label: 'a', property: 'k' }] }
   await d.addQuery('q', 'MATCH (n) RETURN n', ['s'], 'gql', [join])
   await d.updateQuery('q', 'MATCH (n) RETURN n', ['s'])
+  // Sources accept `string | SourceSubscription`; middleware is a trailing arg.
+  const sub: SourceSubscription = { id: 's', pipeline: ['promote-user'] }
+  const mw: QueryMiddleware = {
+    kind: 'promote',
+    name: 'promote-user',
+    config: { mappings: [{ path: '$.user.id', target_name: 'id' }] },
+  }
+  await d.addQuery('q-mw', 'MATCH (p:Person) RETURN p.id AS id', [sub], 'cypher', undefined, [mw])
+  await d.updateQuery('q-mw', 'MATCH (p:Person) RETURN p.id AS id', ['s', sub], undefined, undefined, [mw])
   const rows: Array<Record<string, unknown>> = await d.getQueryResults('q')
   void rows
   const list: ComponentStatusEntry[] = await d.listQueries()
@@ -200,6 +238,9 @@ function classify(err: unknown): string {
   if (code === DrasiErrorCode.UnknownSourceKind) return 'unknown-source'
   if (code === DrasiErrorCode.NoJsSource) return 'no-js-source'
   if (code === DrasiErrorCode.ChangeOpRequired) return 'bad-change'
+  if (code === DrasiErrorCode.UnknownMiddlewareRef) return 'unknown-middleware'
+  if (code === DrasiErrorCode.MiddlewareInvalid) return 'bad-middleware'
+  if (code === DrasiErrorCode.QuerySourceInvalid) return 'bad-source'
   return 'other'
 }
 
@@ -208,6 +249,27 @@ const someCode: DrasiErrorCode = DrasiErrorCode.JsSourceClosed
 const asString: string = someCode
 
 const stateStore: StateStoreOptions = { kind: 'redb', path: '/tmp/x' }
+
+async function schemaDiscovery(): Promise<void> {
+  const d: Drasi = await Drasi.create('app')
+  const src: SourceSchema | null = await d.getSourceSchema('src')
+  if (src) {
+    const label: string = src.nodes[0]?.label
+    const dt: string | undefined | null = src.nodes[0]?.properties[0]?.dataType
+    void label
+    void dt
+  }
+  const graph: GraphSchema = await d.getGraphSchema()
+  const node = graph.nodes['Counter']
+  if (node) {
+    const sources: string[] = node.sources
+    const queriedBy: string[] = node.queriedBy
+    void sources
+    void queriedBy
+  }
+  const missing: string[] = graph.sourcesWithoutSchema
+  void missing
+}
 
 export {
   construction,
@@ -221,4 +283,5 @@ export {
   someCode,
   asString,
   stateStore,
+  schemaDiscovery,
 }

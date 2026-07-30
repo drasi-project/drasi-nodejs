@@ -10,7 +10,7 @@
 //! cdylib plugins, and supports JavaScript-defined sources and reactions.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use napi::bindgen_prelude::PromiseRaw;
 use napi::Env;
@@ -18,7 +18,7 @@ use napi_derive::napi;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use drasi_core::models::SourceChange;
+use drasi_core::models::{SourceChange, SourceMiddlewareConfig};
 use drasi_host_sdk::callbacks;
 use drasi_host_sdk::loader::{PluginLoader, PluginLoaderConfig};
 use drasi_host_sdk::plugin_types::PluginFileEvent;
@@ -29,13 +29,18 @@ use drasi_lib::identity::{
 };
 use drasi_lib::{DrasiLib, MemorySecretStoreProvider, Query};
 use drasi_plugin_sdk::{
-    BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
+    BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
+    SourcePluginDescriptor,
 };
+use drasi_plugin_sdk::prelude::SecretStorePluginDescriptor;
 
 use crate::components::{JsDurableResultFn, JsReaction, JsResultFn, JsSource};
 use crate::conversions::{json_to_source_change, plugin_config_schema, resolve_query_language};
-use crate::error::{coded_message, throw_coded, to_napi, DrasiErrorCode};
-use crate::secrets::{build_config_resolver_context, config_resolver_callback, ConfigResolverContext};
+use crate::error::{coded_message, throw_coded, to_napi, CodedReason, DrasiErrorCode};
+use crate::secrets::{
+    build_config_resolver_context, config_resolver_callback, ConfigResolverContext,
+    SwappableSecretStoreProvider,
+};
 use crate::verification::{verification_decision, verification_to_json};
 
 /// File patterns for discovering cdylib plugins (Unix + Windows naming).
@@ -60,6 +65,8 @@ struct PluginFileKinds {
     sources: Vec<String>,
     reactions: Vec<String>,
     bootstrap: Vec<String>,
+    secret_stores: Vec<String>,
+    identity_providers: Vec<String>,
 }
 
 /// Shared, interior-mutable state behind the JS `Drasi` object.
@@ -68,13 +75,19 @@ struct Inner {
     sources: Mutex<HashMap<String, Arc<dyn SourcePluginDescriptor>>>,
     reactions: Mutex<HashMap<String, Arc<dyn ReactionPluginDescriptor>>>,
     bootstrap: Mutex<HashMap<String, Arc<dyn BootstrapPluginDescriptor>>>,
+    secret_stores: Mutex<HashMap<String, Arc<dyn SecretStorePluginDescriptor>>>,
+    identity_providers: Mutex<HashMap<String, Arc<dyn IdentityProviderPluginDescriptor>>>,
     js_source_senders: Mutex<HashMap<String, mpsc::Sender<SourceChange>>>,
     watchers: Mutex<Vec<PluginWatcher>>,
     /// Maps a plugin file path to the kinds it registered (for watcher removal).
     plugin_files: Mutex<HashMap<String, PluginFileKinds>>,
-    /// Secret store provider, retained so the plugin contexts below can be built
-    /// lazily on first plugin load rather than eagerly for every instance.
-    secret_provider: Arc<dyn SecretStoreProvider>,
+    /// The active secret store provider, swappable at runtime via `useSecretStore`.
+    ///
+    /// Starts as the in-memory store seeded from `create`/`fromConfig` options.
+    /// `useSecretStore` replaces the inner `Arc` so the resolver thread, which
+    /// holds an `Arc<SwappableSecretStoreProvider>` pointing at the same
+    /// `RwLock`, picks up the new provider on its next request.
+    active_secret_provider: Arc<RwLock<Arc<dyn SecretStoreProvider>>>,
     /// This engine instance's id, used when lazily building the callback context.
     instance_id: String,
     /// Whether a durable (disk-backed) state store is configured — required for
@@ -105,8 +118,14 @@ impl Inner {
     /// on drop/close via [`Inner::shutdown_config_resolver`].
     fn ensure_plugin_contexts(&self) -> (usize, usize) {
         let resolver_ctx = *self.resolver_ctx.get_or_init(|| {
+            // Wrap active_secret_provider in a SwappableSecretStoreProvider so
+            // the resolver thread automatically uses whatever provider is current
+            // when useSecretStore later replaces the inner Arc.
+            let swappable = SwappableSecretStoreProvider {
+                inner: self.active_secret_provider.clone(),
+            };
             build_config_resolver_context(
-                self.secret_provider.clone(),
+                Arc::new(swappable),
                 tokio::runtime::Handle::current(),
             ) as usize
         });
@@ -265,7 +284,7 @@ impl Drasi {
         };
 
         type SourceSpec = (String, String, Value, Option<bool>, Option<Value>);
-        type QuerySpec = (String, String, Vec<String>, Option<String>, Option<Value>);
+        type QuerySpec = (String, String, ParsedQueryParts, bool, Option<Value>);
         type ReactionSpec = (String, String, Vec<String>, Value);
 
         let mut sources: Vec<SourceSpec> = Vec::new();
@@ -281,14 +300,23 @@ impl Drasi {
         for q in arr("queries") {
             let qid = req_str(&q, "id")?;
             let text = req_str(&q, "query")?;
-            let srcs = str_vec(&q, "sources");
             let language = q.get("language").and_then(|v| v.as_str()).map(String::from);
             // Validate the language synchronously so a typo throws a typed
             // `err.code` up front instead of silently becoming Cypher (gap G10).
-            resolve_query_language(language.as_deref())
+            let is_gql = resolve_query_language(language.as_deref())
+                .map_err(|r| throw_coded(env, r.code, r.message))?;
+            // `sources` accepts `string | { id, pipeline? }` entries; `middleware`
+            // is an optional `{ kind, name, config? }[]`. Parse + cross-validate
+            // synchronously so pipeline/middleware mistakes throw a typed code. A
+            // present-but-non-array `sources` is a typed error rather than a silent
+            // empty list.
+            let srcs = query_sources_from_config(q.get("sources"))
+                .map_err(|r| throw_coded(env, r.code, r.message))?;
+            let middleware = q.get("middleware").cloned();
+            let parts = parse_query_parts(srcs, middleware)
                 .map_err(|r| throw_coded(env, r.code, r.message))?;
             let joins = q.get("joins").cloned();
-            queries.push((qid, text, srcs, language, joins));
+            queries.push((qid, text, parts, is_gql, joins));
         }
         let mut reactions: Vec<ReactionSpec> = Vec::new();
         for r in arr("reactions") {
@@ -317,9 +345,8 @@ impl Drasi {
                 add_source_full(drasi.inner.clone(), kind, sid, cfg, auto.unwrap_or(true), bootstrap)
                     .await?;
             }
-            for (qid, text, srcs, language, joins) in queries {
-                let is_gql = language.as_deref() == Some("gql");
-                let def = build_query_def(qid, text, srcs, is_gql, joins)?;
+            for (qid, text, parts, is_gql, joins) in queries {
+                let def = build_query_def(qid, text, parts, is_gql, joins)?;
                 drasi.inner.drasi.add_query(def).await.map_err(to_napi)?;
             }
             for (kind, rid, qs, cfg) in reactions {
@@ -335,7 +362,8 @@ impl Drasi {
     // ------------------------------------------------------------------
 
     /// Discover and load all cdylib plugins from `dir`, registering their
-    /// descriptors. Returns `{ plugins, sources, reactions, bootstrap }`.
+    /// descriptors. Returns `{ plugins, sources, reactions, bootstrap,
+    /// secretStores, identityProviders }`.
     ///
     /// When `verify` is provided as `{ filename: sha256hex }`, only plugin files
     /// whose contents hash to the expected value are loaded (an integrity allowlist).
@@ -351,13 +379,15 @@ impl Drasi {
                     .collect()
             })
         });
-        let (plugins, sources, reactions, bootstrap) =
+        let (plugins, sources, reactions, bootstrap, secret_stores, identity_providers) =
             load_dir_into(&self.inner, &dir, verify_map.as_ref()).map_err(to_napi)?;
         Ok(serde_json::json!({
             "plugins": plugins,
             "sources": sources,
             "reactions": reactions,
             "bootstrap": bootstrap,
+            "secretStores": secret_stores,
+            "identityProviders": identity_providers,
         }))
     }
 
@@ -394,6 +424,12 @@ impl Drasi {
                             }
                             for k in &rec.bootstrap {
                                 inner.bootstrap.lock().unwrap().remove(k);
+                            }
+                            for k in &rec.secret_stores {
+                                inner.secret_stores.lock().unwrap().remove(k);
+                            }
+                            for k in &rec.identity_providers {
+                                inner.identity_providers.lock().unwrap().remove(k);
                             }
                             log::info!(
                                 "plugin removed; deregistered its kinds (the cdylib stays mapped): {key}"
@@ -516,7 +552,8 @@ impl Drasi {
         }))
     }
 
-    /// Return the registered plugin kinds: `{ sources, reactions, bootstrap }`.
+    /// Return the registered plugin kinds: `{ sources, reactions, bootstrap,
+    /// secretStores, identityProviders }`.
     #[napi(ts_return_type = "PluginKinds")]
     pub fn plugin_kinds(&self) -> Value {
         let sources: Vec<String> = self.inner.sources.lock().unwrap().keys().cloned().collect();
@@ -524,10 +561,16 @@ impl Drasi {
             self.inner.reactions.lock().unwrap().keys().cloned().collect();
         let bootstrap: Vec<String> =
             self.inner.bootstrap.lock().unwrap().keys().cloned().collect();
+        let secret_stores: Vec<String> =
+            self.inner.secret_stores.lock().unwrap().keys().cloned().collect();
+        let identity_providers: Vec<String> =
+            self.inner.identity_providers.lock().unwrap().keys().cloned().collect();
         serde_json::json!({
             "sources": sources,
             "reactions": reactions,
             "bootstrap": bootstrap,
+            "secretStores": secret_stores,
+            "identityProviders": identity_providers,
         })
     }
 
@@ -577,6 +620,105 @@ impl Drasi {
             descriptor.config_schema_name(),
             &descriptor.config_schema_json(),
         ))
+    }
+
+    /// Return the config schema advertised by a registered **secret store** plugin
+    /// kind as `{ name, schema }`. Throws a typed `UNKNOWN_SECRET_STORE_KIND`
+    /// error if the kind is not registered.
+    #[napi(ts_return_type = "PluginConfigSchema")]
+    pub fn secret_store_config_schema(&self, env: &Env, kind: String) -> napi::Result<Value> {
+        let descriptor = {
+            self.inner.secret_stores.lock().unwrap().get(&kind).cloned()
+        }
+        .ok_or_else(|| {
+            throw_coded(
+                env,
+                DrasiErrorCode::UnknownSecretStoreKind,
+                format!("unknown secret store kind '{kind}'"),
+            )
+        })?;
+        Ok(plugin_config_schema(
+            descriptor.config_schema_name(),
+            &descriptor.config_schema_json(),
+        ))
+    }
+
+    /// Return the config schema advertised by a registered **identity provider**
+    /// plugin kind as `{ name, schema }`. Throws a typed
+    /// `UNKNOWN_IDENTITY_PROVIDER_KIND` error if the kind is not registered.
+    #[napi(ts_return_type = "PluginConfigSchema")]
+    pub fn identity_provider_config_schema(
+        &self,
+        env: &Env,
+        kind: String,
+    ) -> napi::Result<Value> {
+        let descriptor = {
+            self.inner
+                .identity_providers
+                .lock()
+                .unwrap()
+                .get(&kind)
+                .cloned()
+        }
+        .ok_or_else(|| {
+            throw_coded(
+                env,
+                DrasiErrorCode::UnknownIdentityProviderKind,
+                format!("unknown identity provider kind '{kind}'"),
+            )
+        })?;
+        Ok(plugin_config_schema(
+            descriptor.config_schema_name(),
+            &descriptor.config_schema_json(),
+        ))
+    }
+
+    /// Activate a plugin-provided secret store.
+    ///
+    /// Creates a [`SecretStoreProvider`] from the registered plugin `kind` with
+    /// the given `config` and replaces the active store used by the config
+    /// resolver. Subsequent `ConfigValue::Secret` references in plugin configs
+    /// resolve through the new store.
+    ///
+    /// Must be called after `loadPlugins` has registered the plugin and before
+    /// any component whose config references a `Secret` value is started.
+    /// Throws a typed `UNKNOWN_SECRET_STORE_KIND` error if the kind is not
+    /// registered.
+    #[napi(
+        ts_args_type = "kind: string, config?: Record<string, unknown>",
+    )]
+    pub async fn use_secret_store(
+        &self,
+        kind: String,
+        config: Option<Value>,
+    ) -> napi::Result<()> {
+        let config = config.unwrap_or_else(|| Value::Object(Default::default()));
+        let descriptor = {
+            self.inner.secret_stores.lock().unwrap().get(&kind).cloned()
+        }
+        .ok_or_else(|| {
+            coded_message(
+                DrasiErrorCode::UnknownSecretStoreKind,
+                format!("unknown secret store kind '{kind}'"),
+            )
+        })?;
+
+        let provider: Box<dyn SecretStoreProvider> = descriptor
+            .create_secret_store(&config)
+            .await
+            .map_err(|e| {
+                coded_message(DrasiErrorCode::ConfigInvalid, e.to_string())
+            })?;
+
+        // Swap the active provider. The resolver thread picks up the new
+        // provider on its next request because SwappableSecretStoreProvider
+        // reads through the same RwLock.
+        *self
+            .inner
+            .active_secret_provider
+            .write()
+            .expect("active_secret_provider lock poisoned") = Arc::from(provider);
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -749,37 +891,79 @@ impl Drasi {
         Ok(statuses_to_json(items))
     }
 
+    /// Get the best-effort graph schema a source reports about the data flowing
+    /// through it — node/relation labels, their properties, and property-type
+    /// hints — or `null` when the source doesn't describe one. Sources implement
+    /// this on a best-effort basis via `Source::describe_schema()`; it is
+    /// informational, not enforced (drasi-core#416).
+    #[napi(ts_return_type = "Promise<SourceSchema | null>")]
+    pub async fn get_source_schema(&self, id: String) -> napi::Result<Value> {
+        let schema = self
+            .inner
+            .drasi
+            .get_source_schema(&id)
+            .await
+            .map_err(to_napi)?;
+        match schema {
+            Some(s) => serde_json::to_value(s).map_err(to_napi),
+            None => Ok(Value::Null),
+        }
+    }
+
+    /// Get the merged graph schema across all sources and queries: for each
+    /// node/relation label, which sources provide it and which queries reference
+    /// it, plus known properties, and any `sourcesWithoutSchema`. Useful for
+    /// inspection, validation, and LLM/MCP tooling (drasi-core#416).
+    #[napi(ts_return_type = "Promise<GraphSchema>")]
+    pub async fn get_graph_schema(&self) -> napi::Result<Value> {
+        let schema = self.inner.drasi.get_graph_schema().await.map_err(to_napi)?;
+        serde_json::to_value(schema).map_err(to_napi)
+    }
+
     // ------------------------------------------------------------------
     // Queries
     // ------------------------------------------------------------------
 
-    /// Add a continuous query over the given source ids.
+    /// Add a continuous query over the given sources.
+    ///
+    /// `sources` entries are each either a bare source-id `string` (no middleware)
+    /// or a `{ id, pipeline? }` object, where `pipeline` is an ordered list of
+    /// middleware `name`s applied to changes from that source before they reach the
+    /// query. `middleware` is an optional array of `{ kind, name, config? }`
+    /// definitions the pipelines reference; `kind` selects a compiled-in factory
+    /// (`map`, `unwind`, `parse_json`, `promote`, `relabel`, `decoder`).
     ///
     /// `language` is `"cypher"` (default) or `"gql"`. `joins` is an optional array of
     /// synthetic join definitions (`[{ id, keys: [{ label, property }] }]`) used to
     /// relate elements across sources that have no explicit relationship.
     ///
-    /// `language` is validated synchronously (a value other than `"cypher"`/`"gql"`
-    /// throws a typed `err.code`); building and registering the query resolves
+    /// `language`, the `sources`/`middleware` shapes, and pipeline references are
+    /// validated synchronously (each throws a typed `err.code`:
+    /// `UNKNOWN_QUERY_LANGUAGE`, `QUERY_SOURCE_INVALID`, `MIDDLEWARE_INVALID`,
+    /// `UNKNOWN_MIDDLEWARE_REF`); building and registering the query resolves
     /// asynchronously.
     #[napi(
-        ts_args_type = "id: string, query: string, sources: Array<string>, language?: 'cypher' | 'gql', joins?: QueryJoin[]",
+        ts_args_type = "id: string, query: string, sources: Array<string | SourceSubscription>, language?: 'cypher' | 'gql', joins?: QueryJoin[], middleware?: QueryMiddleware[]",
         ts_return_type = "Promise<void>"
     )]
+    #[allow(clippy::too_many_arguments)]
     pub fn add_query<'a>(
         &self,
         env: &'a Env,
         id: String,
         query: String,
-        sources: Vec<String>,
+        sources: Vec<Value>,
         language: Option<String>,
         joins: Option<Value>,
+        middleware: Option<Value>,
     ) -> napi::Result<PromiseRaw<'a, ()>> {
         let is_gql = resolve_query_language(language.as_deref())
             .map_err(|r| throw_coded(env, r.code, r.message))?;
+        let parts = parse_query_parts(sources, middleware)
+            .map_err(|r| throw_coded(env, r.code, r.message))?;
         let inner = self.inner.clone();
         env.spawn_future(async move {
-            let def = build_query_def(id, query, sources, is_gql, joins)?;
+            let def = build_query_def(id, query, parts, is_gql, joins)?;
             inner.drasi.add_query(def).await.map_err(to_napi)
         })
     }
@@ -792,27 +976,32 @@ impl Drasi {
 
     /// Replace a query's definition in place (same id).
     ///
-    /// `joins` matches `addQuery`: an optional array of synthetic join definitions.
-    /// `language` is validated synchronously (typed `err.code`); the replacement
-    /// resolves asynchronously.
+    /// `sources`, `joins`, and `middleware` match `addQuery` (source pipelines and
+    /// query middleware definitions are supported). `language`, the
+    /// `sources`/`middleware` shapes, and pipeline references are validated
+    /// synchronously (typed `err.code`); the replacement resolves asynchronously.
     #[napi(
-        ts_args_type = "id: string, query: string, sources: Array<string>, language?: 'cypher' | 'gql', joins?: QueryJoin[]",
+        ts_args_type = "id: string, query: string, sources: Array<string | SourceSubscription>, language?: 'cypher' | 'gql', joins?: QueryJoin[], middleware?: QueryMiddleware[]",
         ts_return_type = "Promise<void>"
     )]
+    #[allow(clippy::too_many_arguments)]
     pub fn update_query<'a>(
         &self,
         env: &'a Env,
         id: String,
         query: String,
-        sources: Vec<String>,
+        sources: Vec<Value>,
         language: Option<String>,
         joins: Option<Value>,
+        middleware: Option<Value>,
     ) -> napi::Result<PromiseRaw<'a, ()>> {
         let is_gql = resolve_query_language(language.as_deref())
             .map_err(|r| throw_coded(env, r.code, r.message))?;
+        let parts = parse_query_parts(sources, middleware)
+            .map_err(|r| throw_coded(env, r.code, r.message))?;
         let inner = self.inner.clone();
         env.spawn_future(async move {
-            let def = build_query_def(id.clone(), query, sources, is_gql, joins)?;
+            let def = build_query_def(id.clone(), query, parts, is_gql, joins)?;
             inner.drasi.update_query(&id, def).await.map_err(to_napi)
         })
     }
@@ -1446,16 +1635,19 @@ async fn build_engine(
         builder = builder.with_identity_provider(build_identity_provider(identity));
     }
     let core = builder.build().await.map_err(to_napi)?;
+    let active_secret_provider = Arc::new(RwLock::new(provider));
     Ok(Drasi {
         inner: Arc::new(Inner {
             drasi: Arc::new(core),
             sources: Mutex::new(HashMap::new()),
             reactions: Mutex::new(HashMap::new()),
             bootstrap: Mutex::new(HashMap::new()),
+            secret_stores: Mutex::new(HashMap::new()),
+            identity_providers: Mutex::new(HashMap::new()),
             js_source_senders: Mutex::new(HashMap::new()),
             watchers: Mutex::new(Vec::new()),
             plugin_files: Mutex::new(HashMap::new()),
-            secret_provider: provider,
+            active_secret_provider,
             instance_id: id,
             has_durable_state_store,
             resolver_ctx: OnceLock::new(),
@@ -1544,29 +1736,197 @@ fn parse_joins(joins: Value) -> napi::Result<Vec<drasi_lib::config::QueryJoinCon
     serde_json::from_value(joins).map_err(to_napi)
 }
 
+/// A parsed query source subscription: a source id plus an (possibly empty)
+/// ordered middleware pipeline (a list of middleware `name`s).
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedSource {
+    id: String,
+    pipeline: Vec<String>,
+}
+
+/// The parsed + cross-validated `sources` and `middleware` query arguments shared
+/// by `addQuery` / `updateQuery` / `fromConfig`.
+#[derive(Debug)]
+struct ParsedQueryParts {
+    sources: Vec<ParsedSource>,
+    middleware: Vec<SourceMiddlewareConfig>,
+}
+
+/// Extract a query's `sources` value from a declarative `fromConfig` entry into
+/// the `Vec<Value>` [`parse_query_sources`] expects. An absent or `null` value
+/// means "no sources"; a present-but-non-array value is a typed
+/// `QUERY_SOURCE_INVALID` error rather than a silent empty list. (The
+/// `addQuery`/`updateQuery` paths receive `Vec<Value>` directly, so napi already
+/// rejects a non-array there at the FFI boundary.)
+fn query_sources_from_config(value: Option<&Value>) -> Result<Vec<Value>, CodedReason> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => Ok(items.clone()),
+        Some(_) => Err(CodedReason::new(
+            DrasiErrorCode::QuerySourceInvalid,
+            "query 'sources' must be an array of source-id strings or { id, pipeline? } objects",
+        )),
+    }
+}
+
+/// Parse the query `sources` argument: an array whose entries are each either a
+/// bare source-id `string` (no pipeline) or an object `{ id, pipeline? }`, where
+/// `pipeline` is an ordered array of middleware-name strings.
+fn parse_query_sources(sources: Vec<Value>) -> Result<Vec<ParsedSource>, CodedReason> {
+    let invalid = |msg: &str| CodedReason::new(DrasiErrorCode::QuerySourceInvalid, msg.to_string());
+    let mut out = Vec::with_capacity(sources.len());
+    for entry in sources {
+        match entry {
+            Value::String(id) => out.push(ParsedSource {
+                id,
+                pipeline: Vec::new(),
+            }),
+            Value::Object(map) => {
+                let id = map
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| invalid("query source object is missing a string 'id'"))?
+                    .to_string();
+                let pipeline = match map.get("pipeline") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .map(|item| {
+                            item.as_str().map(String::from).ok_or_else(|| {
+                                invalid(
+                                    "query source 'pipeline' must be an array of middleware-name strings",
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    Some(_) => {
+                        return Err(invalid(
+                            "query source 'pipeline' must be an array of middleware-name strings",
+                        ))
+                    }
+                };
+                out.push(ParsedSource { id, pipeline });
+            }
+            _ => {
+                return Err(invalid(
+                    "each query source must be a source-id string or a { id, pipeline? } object",
+                ))
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Parse the optional query `middleware` argument: an array of
+/// `{ kind, name, config? }` definitions. An omitted `config` defaults to `{}`.
+fn parse_query_middleware(
+    middleware: Option<Value>,
+) -> Result<Vec<SourceMiddlewareConfig>, CodedReason> {
+    let invalid = |msg: String| CodedReason::new(DrasiErrorCode::MiddlewareInvalid, msg);
+    let value = match middleware {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(v) => v,
+    };
+    let entries = value.as_array().ok_or_else(|| {
+        invalid("query 'middleware' must be an array of { kind, name, config? } objects".into())
+    })?;
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let obj = entry
+            .as_object()
+            .ok_or_else(|| invalid("each query middleware must be a { kind, name, config? } object".into()))?;
+        let kind = obj
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid("query middleware is missing a string 'kind'".into()))?;
+        let name = obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| invalid("query middleware is missing a string 'name'".into()))?;
+        let config = match obj.get("config") {
+            None | Some(Value::Null) => serde_json::Map::new(),
+            Some(Value::Object(m)) => m.clone(),
+            Some(_) => {
+                return Err(invalid(format!(
+                    "query middleware '{name}' 'config' must be an object"
+                )))
+            }
+        };
+        out.push(SourceMiddlewareConfig::new(kind, name, config));
+    }
+    Ok(out)
+}
+
+/// Ensure every middleware name referenced by a source `pipeline` is defined in
+/// the query's `middleware` list (middleware is query-scoped in drasi-lib).
+fn validate_pipeline_refs(
+    sources: &[ParsedSource],
+    middleware: &[SourceMiddlewareConfig],
+) -> Result<(), CodedReason> {
+    for source in sources {
+        for name in &source.pipeline {
+            if !middleware.iter().any(|m| m.name.as_ref() == name.as_str()) {
+                return Err(CodedReason::new(
+                    DrasiErrorCode::UnknownMiddlewareRef,
+                    format!(
+                        "source '{}' pipeline references undefined middleware '{}'",
+                        source.id, name
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse and cross-validate the `sources` + `middleware` query arguments into the
+/// structured parts consumed by [`build_query_def`].
+fn parse_query_parts(
+    sources: Vec<Value>,
+    middleware: Option<Value>,
+) -> Result<ParsedQueryParts, CodedReason> {
+    let sources = parse_query_sources(sources)?;
+    let middleware = parse_query_middleware(middleware)?;
+    validate_pipeline_refs(&sources, &middleware)?;
+    Ok(ParsedQueryParts {
+        sources,
+        middleware,
+    })
+}
+
 /// Build a drasi-lib [`Query`] definition from validated parts. `is_gql` selects
 /// the GQL builder (already validated by [`resolve_query_language`]); everything
-/// else uses Cypher. Shared by `addQuery`/`updateQuery` and `fromConfig`.
+/// else uses Cypher. Source subscriptions with a non-empty pipeline use
+/// `from_source_with_pipeline`; query middleware is registered via
+/// `with_middleware`. Shared by `addQuery`/`updateQuery` and `fromConfig`.
 fn build_query_def(
     id: String,
     query: String,
-    sources: Vec<String>,
+    parts: ParsedQueryParts,
     is_gql: bool,
     joins: Option<Value>,
 ) -> napi::Result<drasi_lib::QueryConfig> {
     let mut builder = if is_gql { Query::gql(id) } else { Query::cypher(id) };
     builder = builder.query(query);
-    for source in sources {
-        builder = builder.from_source(source);
+    for source in parts.sources {
+        builder = if source.pipeline.is_empty() {
+            builder.from_source(source.id)
+        } else {
+            builder.from_source_with_pipeline(source.id, source.pipeline)
+        };
     }
     if let Some(joins) = joins {
         builder = builder.with_joins(parse_joins(joins)?);
+    }
+    for middleware in parts.middleware {
+        builder = builder.with_middleware(middleware);
     }
     Ok(builder.build())
 }
 
 /// Scan `dir` for cdylib plugins and register their descriptors into `inner`.
-/// Returns `(plugins, sources, reactions, bootstrap)` counts.
+/// Returns `(plugins, sources, reactions, bootstrap, secret_stores,
+/// identity_providers)` counts.
 ///
 /// When `verify` is `Some(map)` of `filename -> sha256hex`, only files whose
 /// contents hash to the expected value are loaded.
@@ -1574,7 +1934,7 @@ fn load_dir_into(
     inner: &Inner,
     dir: &str,
     verify: Option<&HashMap<String, String>>,
-) -> anyhow::Result<(usize, usize, usize, usize)> {
+) -> anyhow::Result<(usize, usize, usize, usize, usize, usize)> {
     let file_patterns: Vec<String> = if let Some(expected) = verify {
         // Build an allowlist of exact filenames whose hash matches.
         let mut allow = Vec::new();
@@ -1614,7 +1974,8 @@ fn load_dir_into(
         callbacks::default_lifecycle_callback_fn(),
     )?;
 
-    let (mut plugins, mut sources, mut reactions, mut bootstrap) = (0, 0, 0, 0);
+    let (mut plugins, mut sources, mut reactions, mut bootstrap, mut secret_stores, mut identity_providers) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
 
     for mut plugin in loaded {
         plugins += 1;
@@ -1644,12 +2005,24 @@ fn load_dir_into(
             inner.bootstrap.lock().unwrap().insert(kind, Arc::new(proxy));
             bootstrap += 1;
         }
+        for proxy in std::mem::take(&mut plugin.secret_store_plugins) {
+            let kind = proxy.kind().to_string();
+            rec.secret_stores.push(kind.clone());
+            inner.secret_stores.lock().unwrap().insert(kind, Arc::new(proxy));
+            secret_stores += 1;
+        }
+        for proxy in std::mem::take(&mut plugin.identity_provider_plugins) {
+            let kind = proxy.kind().to_string();
+            rec.identity_providers.push(kind.clone());
+            inner.identity_providers.lock().unwrap().insert(kind, Arc::new(proxy));
+            identity_providers += 1;
+        }
         inner.plugin_files.lock().unwrap().insert(file, rec);
         // `plugin` (LoadedPlugin) drops here, intentionally leaking the
         // underlying library so the cdylib stays mapped for the process.
     }
 
-    Ok((plugins, sources, reactions, bootstrap))
+    Ok((plugins, sources, reactions, bootstrap, secret_stores, identity_providers))
 }
 
 /// Spawn a task that forwards a stream of `ComponentEvent`s to a JS callback.
@@ -1743,5 +2116,195 @@ mod tests {
             { "id": "j", "keys": [{ "label": "a" }] }
         ]))
         .is_err());
+    }
+
+    fn vals(v: Value) -> Vec<Value> {
+        v.as_array().cloned().unwrap()
+    }
+
+    #[test]
+    fn parse_query_sources_accepts_strings_objects_and_pipelines() {
+        let parsed = parse_query_sources(vals(json!([
+            "plain",
+            { "id": "with-empty" },
+            { "id": "with-pipe", "pipeline": ["a", "b"] }
+        ])))
+        .expect("well-formed sources should parse");
+
+        assert_eq!(
+            parsed,
+            vec![
+                ParsedSource { id: "plain".into(), pipeline: vec![] },
+                ParsedSource { id: "with-empty".into(), pipeline: vec![] },
+                ParsedSource {
+                    id: "with-pipe".into(),
+                    pipeline: vec!["a".into(), "b".into()]
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn query_sources_from_config_defaults_and_validates() {
+        // Absent or null -> empty (backward compatible).
+        assert!(query_sources_from_config(None).unwrap().is_empty());
+        assert!(query_sources_from_config(Some(&Value::Null)).unwrap().is_empty());
+        // An array passes through unchanged.
+        let arr = json!(["a", { "id": "b", "pipeline": ["m"] }]);
+        assert_eq!(query_sources_from_config(Some(&arr)).unwrap(), vals(arr.clone()));
+        // A present-but-non-array value is a typed error, not a silent empty list.
+        for bad in [json!("s"), json!({ "id": "s" }), json!(42)] {
+            assert_eq!(
+                query_sources_from_config(Some(&bad)).unwrap_err().code,
+                DrasiErrorCode::QuerySourceInvalid
+            );
+        }
+    }
+
+    #[test]
+    fn parse_query_sources_rejects_bad_shapes() {
+        // Entry that is neither a string nor an object.
+        let err = parse_query_sources(vals(json!([42]))).unwrap_err();
+        assert_eq!(err.code, DrasiErrorCode::QuerySourceInvalid);
+        // Object missing `id`.
+        assert_eq!(
+            parse_query_sources(vals(json!([{ "pipeline": ["a"] }])))
+                .unwrap_err()
+                .code,
+            DrasiErrorCode::QuerySourceInvalid
+        );
+        // `pipeline` not an array of strings.
+        assert_eq!(
+            parse_query_sources(vals(json!([{ "id": "s", "pipeline": [1] }])))
+                .unwrap_err()
+                .code,
+            DrasiErrorCode::QuerySourceInvalid
+        );
+        assert_eq!(
+            parse_query_sources(vals(json!([{ "id": "s", "pipeline": "a" }])))
+                .unwrap_err()
+                .code,
+            DrasiErrorCode::QuerySourceInvalid
+        );
+    }
+
+    #[test]
+    fn parse_query_middleware_parses_and_defaults_config() {
+        let mw = parse_query_middleware(Some(json!([
+            { "kind": "promote", "name": "p", "config": { "mappings": [] } },
+            { "kind": "unwind", "name": "u" }
+        ])))
+        .expect("well-formed middleware should parse");
+
+        assert_eq!(mw.len(), 2);
+        assert_eq!(mw[0].kind.as_ref(), "promote");
+        assert_eq!(mw[0].name.as_ref(), "p");
+        assert!(mw[0].config.contains_key("mappings"));
+        // Omitted `config` defaults to an empty object.
+        assert_eq!(mw[1].name.as_ref(), "u");
+        assert!(mw[1].config.is_empty());
+    }
+
+    #[test]
+    fn parse_query_middleware_treats_none_as_empty() {
+        assert!(parse_query_middleware(None).unwrap().is_empty());
+        assert!(parse_query_middleware(Some(Value::Null)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_query_middleware_rejects_bad_shapes() {
+        // Not an array.
+        assert_eq!(
+            parse_query_middleware(Some(json!({ "kind": "promote", "name": "p" })))
+                .unwrap_err()
+                .code,
+            DrasiErrorCode::MiddlewareInvalid
+        );
+        // Missing `kind`.
+        assert_eq!(
+            parse_query_middleware(Some(json!([{ "name": "p" }])))
+                .unwrap_err()
+                .code,
+            DrasiErrorCode::MiddlewareInvalid
+        );
+        // Missing `name`.
+        assert_eq!(
+            parse_query_middleware(Some(json!([{ "kind": "promote" }])))
+                .unwrap_err()
+                .code,
+            DrasiErrorCode::MiddlewareInvalid
+        );
+        // `config` not an object.
+        assert_eq!(
+            parse_query_middleware(Some(json!([{ "kind": "promote", "name": "p", "config": 1 }])))
+                .unwrap_err()
+                .code,
+            DrasiErrorCode::MiddlewareInvalid
+        );
+    }
+
+    #[test]
+    fn validate_pipeline_refs_accepts_defined_and_rejects_unknown() {
+        let sources = vec![ParsedSource {
+            id: "s".into(),
+            pipeline: vec!["p".into()],
+        }];
+        let defined = vec![SourceMiddlewareConfig::new("promote", "p", serde_json::Map::new())];
+        assert!(validate_pipeline_refs(&sources, &defined).is_ok());
+
+        let none: Vec<SourceMiddlewareConfig> = vec![];
+        let err = validate_pipeline_refs(&sources, &none).unwrap_err();
+        assert_eq!(err.code, DrasiErrorCode::UnknownMiddlewareRef);
+    }
+
+    #[test]
+    fn parse_query_parts_cross_validates_pipeline_refs() {
+        // A pipeline referencing an undefined middleware name is rejected up front.
+        let err = parse_query_parts(
+            vals(json!([{ "id": "s", "pipeline": ["missing"] }])),
+            Some(json!([{ "kind": "promote", "name": "present" }])),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, DrasiErrorCode::UnknownMiddlewareRef);
+    }
+
+    #[test]
+    fn build_query_def_wires_pipelines_and_middleware() {
+        let parts = parse_query_parts(
+            vals(json!([{ "id": "people", "pipeline": ["promote-user"] }])),
+            Some(json!([{
+                "kind": "promote",
+                "name": "promote-user",
+                "config": { "mappings": [{ "path": "$.user.id", "target_name": "id" }] }
+            }])),
+        )
+        .expect("parts parse");
+
+        let def = build_query_def(
+            "q".into(),
+            "MATCH (p:Person) RETURN p.id AS id".into(),
+            parts,
+            false,
+            None,
+        )
+        .expect("build succeeds");
+
+        assert_eq!(def.sources.len(), 1);
+        assert_eq!(def.sources[0].source_id, "people");
+        assert_eq!(def.sources[0].pipeline, vec!["promote-user".to_string()]);
+        assert_eq!(def.middleware.len(), 1);
+        assert_eq!(def.middleware[0].kind.as_ref(), "promote");
+        assert_eq!(def.middleware[0].name.as_ref(), "promote-user");
+    }
+
+    #[test]
+    fn build_query_def_bare_string_source_has_no_pipeline() {
+        let parts = parse_query_parts(vals(json!(["src"])), None).expect("parts parse");
+        let def = build_query_def("q".into(), "MATCH (n) RETURN n".into(), parts, false, None)
+            .expect("build succeeds");
+        assert_eq!(def.sources.len(), 1);
+        assert_eq!(def.sources[0].source_id, "src");
+        assert!(def.sources[0].pipeline.is_empty());
+        assert!(def.middleware.is_empty());
     }
 }

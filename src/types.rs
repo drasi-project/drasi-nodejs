@@ -100,10 +100,38 @@ pub struct SourceConfig {
 pub struct QueryConfig {
     pub id: String,
     pub query: String,
-    pub sources: Vec<String>,
+    #[napi(ts_type = "Array<string | SourceSubscription>")]
+    pub sources: Value,
     #[napi(ts_type = "'cypher' | 'gql'")]
     pub language: Option<String>,
     pub joins: Option<Vec<QueryJoin>>,
+    pub middleware: Option<Vec<QueryMiddleware>>,
+}
+
+/// A per-query source subscription with an optional middleware pipeline.
+///
+/// Used wherever a query lists its `sources`. A bare `string` is shorthand for
+/// `{ id }` with no pipeline. `pipeline` is an ordered list of middleware `name`s
+/// (defined in the query's `middleware`) applied to changes from this source
+/// before they reach the query; order is significant.
+#[napi(object)]
+pub struct SourceSubscription {
+    pub id: String,
+    pub pipeline: Option<Vec<String>>,
+}
+
+/// A middleware definition registered on a query and referenced by `name` from a
+/// source subscription's `pipeline`.
+///
+/// `kind` selects a compiled-in middleware factory (`map`, `unwind`, `parse_json`,
+/// `promote`, `relabel`, `decoder`); `name` is the identifier used in pipelines;
+/// `config` is the middleware-specific configuration (defaults to `{}`).
+#[napi(object)]
+pub struct QueryMiddleware {
+    pub kind: String,
+    pub name: String,
+    #[napi(ts_type = "Record<string, unknown>")]
+    pub config: Option<Value>,
 }
 
 /// A declarative reaction entry in [`DrasiConfig`].
@@ -212,6 +240,8 @@ pub struct LoadPluginsResult {
     pub sources: f64,
     pub reactions: f64,
     pub bootstrap: f64,
+    pub secret_stores: f64,
+    pub identity_providers: f64,
 }
 
 /// The registered plugin kinds returned by `pluginKinds`.
@@ -220,6 +250,8 @@ pub struct PluginKinds {
     pub sources: Vec<String>,
     pub reactions: Vec<String>,
     pub bootstrap: Vec<String>,
+    pub secret_stores: Vec<String>,
+    pub identity_providers: Vec<String>,
 }
 
 /// A plugin kind's declared config schema (audit gap G9), returned by
@@ -388,4 +420,76 @@ pub struct LogMessage {
     pub component_id: String,
     #[napi(js_name = "component_type")]
     pub component_type: String,
+}
+
+// ---------------------------------------------------------------------------
+// Source & graph schema discovery (drasi-core#416), returned by
+// `getSourceSchema` / `getGraphSchema`. Best-effort: sources describe their
+// graph shape via `Source::describe_schema()`. Runtime marshals JSON; these
+// shapes mirror the upstream camelCase serialization.
+// ---------------------------------------------------------------------------
+
+/// A single property in a source/graph schema. `dataType` is a best-effort hint.
+#[napi(object)]
+pub struct PropertySchema {
+    pub name: String,
+    #[napi(ts_type = "'string' | 'integer' | 'float' | 'boolean' | 'timestamp' | 'json'")]
+    pub data_type: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Schema for a single node label reported by a source (`getSourceSchema`).
+#[napi(object)]
+pub struct NodeSchema {
+    pub label: String,
+    pub properties: Vec<PropertySchema>,
+}
+
+/// Schema for a single relationship label reported by a source
+/// (`getSourceSchema`). `from`/`to` are the source/target node labels when known.
+#[napi(object)]
+pub struct RelationSchema {
+    pub label: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub properties: Vec<PropertySchema>,
+}
+
+/// Best-effort graph schema reported by a single source, returned by
+/// `getSourceSchema` (or `null` when the source doesn't describe one).
+#[napi(object)]
+pub struct SourceSchema {
+    pub nodes: Vec<NodeSchema>,
+    pub relations: Vec<RelationSchema>,
+}
+
+/// Aggregated node schema in the merged graph schema: which sources provide the
+/// label and which queries reference it.
+#[napi(object)]
+pub struct GraphNodeSchema {
+    pub sources: Vec<String>,
+    pub queried_by: Vec<String>,
+    pub properties: Vec<PropertySchema>,
+}
+
+/// Aggregated relationship schema in the merged graph schema.
+#[napi(object)]
+pub struct GraphRelationSchema {
+    pub sources: Vec<String>,
+    pub queried_by: Vec<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub properties: Vec<PropertySchema>,
+}
+
+/// The merged graph schema across all sources and queries, returned by
+/// `getGraphSchema`. `nodes`/`relations` are keyed by label; `sourcesWithoutSchema`
+/// lists sources that exist but did not describe a schema.
+#[napi(object)]
+pub struct GraphSchema {
+    #[napi(ts_type = "Record<string, GraphNodeSchema>")]
+    pub nodes: Value,
+    #[napi(ts_type = "Record<string, GraphRelationSchema>")]
+    pub relations: Value,
+    pub sources_without_schema: Vec<String>,
 }

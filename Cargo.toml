@@ -1,6 +1,6 @@
 [package]
 name = "drasi"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Embed the Drasi continuous-query engine in Node.js, with dynamic plugin loading and JavaScript-defined sources and reactions"
@@ -23,7 +23,20 @@ napi-derive = "3"
 # test suite are likewise built from published crates (see scripts/build-plugins.mjs),
 # so the host and plugins share a matching plugin-SDK / FFI ABI (0.10) without a
 # local drasi-core checkout.
-drasi-lib = "0.8.9"
+# The `middleware-*` features compile in the standard source-middleware factories
+# (map, unwind, parse_json, promote, relabel, decoder) so query writers can define
+# middleware and reference it in per-source pipelines. `middleware-jq` is
+# deliberately omitted: it pulls in `jq-rs` (a system/bundled libjq + C toolchain),
+# which would jeopardize the cross-platform prebuilt-binary story. jq can be added
+# later as an opt-in via `middleware-bundled-jq`.
+drasi-lib = { version = "0.8.9", features = [
+    "middleware-map",
+    "middleware-unwind",
+    "middleware-parse-json",
+    "middleware-promote",
+    "middleware-relabel",
+    "middleware-decoder",
+] }
 drasi-core = "0.5.7"
 drasi-host-sdk = { version = "0.10.0", features = ["watcher", "registry"] }
 drasi-plugin-sdk = "0.10.0"

@@ -1,0 +1,22 @@
+{
+  "name": "drasi-nodejs-docs",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Hugo + Docsy documentation site for the @drasi/lib Node.js library",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/drasi-project/drasi-nodejs.git",
+    "directory": "website"
+  },
+  "scripts": {
+    "get:theme": "cd themes/docsy && npm install",
+    "build": "hugo --gc --minify",
+    "serve": "hugo server"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.22",
+    "postcss": "^8.5.6",
+    "postcss-cli": "^11.0.1"
+  }
+}

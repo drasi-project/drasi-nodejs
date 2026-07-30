@@ -13,6 +13,10 @@ Cargo.lock.bak
 npm-debug.log*
 yarn-error.log*
 
+# Real .npmrc may carry registry credentials — never commit it.
+# The tracked `.npmrc.*.example` templates are unaffected by this rule.
+.npmrc
+
 # napi build artifacts
 *.node
 /index.js

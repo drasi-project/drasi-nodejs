@@ -54,7 +54,7 @@ object unless marked **static**.
 | --- | --- |
 | Construction | `create`¹, `fromConfig`¹ |
 | Plugins | `loadPlugins`, `watchPlugins`, `listPluginTags`, `pullPlugin`, `pluginKinds`² |
-| Sources | `addSource`, `addJsSource`, `pushChange`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources` |
+| Sources | `addSource`, `addJsSource`, `pushChange`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources`, `getSourceSchema`, `getGraphSchema` |
 | Queries | `addQuery`, `updateQuery`, `startQuery`, `stopQuery`, `getQueryResults`, `removeQuery`, `listQueries` |
 | Reactions | `addReaction`, `addJsReaction`, `addDurableJsReaction`, `updateReaction`, `startReaction`, `stopReaction`, `removeReaction`, `listReactions` |
 | Metrics | `getQueryMetrics`, `getReactionMetrics`, `getLifecycleMetrics` |
@@ -116,12 +116,17 @@ and reaction (which auto-start on the running engine).
 - `secrets?`, `stateStore?`, `indexStore?`, `identity?` — forwarded to `create`.
 - `pluginsDir?: string` — if present, `loadPlugins(pluginsDir)` runs before start.
 - `sources?: Array<{ kind, id, config?, autoStart?, bootstrap? }>`
-- `queries?: Array<{ id, query, sources, language?, joins? }>`
+- `queries?: Array<{ id, query, sources, language?, joins?, middleware? }>` — `sources`
+  entries are each a source-id `string` or a `{ id, pipeline? }` object, and
+  `middleware?` is an array of `{ kind, name, config? }` definitions (see
+  [`addQuery`](#addqueryid-query-sources-language-joins-middleware--promisevoid)).
 - `reactions?: Array<{ kind, id, queries, config? }>`
 
 **Errors:** `config entry is missing '<key>'` when a required field (`kind`/`id`
-for sources/reactions, `id`/`query` for queries) is absent, plus any error from
-the underlying `add*`/`loadPlugins`/`start` calls.
+for sources/reactions, `id`/`query` for queries) is absent; the same synchronous
+typed codes as `addQuery` (`UNKNOWN_QUERY_LANGUAGE`, `QUERY_SOURCE_INVALID`,
+`MIDDLEWARE_INVALID`, `UNKNOWN_MIDDLEWARE_REF`); plus any error from the underlying
+`add*`/`loadPlugins`/`start` calls.
 
 ---
 
@@ -280,11 +285,52 @@ external state (default `false`).
 List sources. `status` is a debug-formatted `ComponentStatus` string (see
 [Component status](#component-status)).
 
+### `getSourceSchema(id)` → `Promise<SourceSchema | null>`
+
+Return the best-effort graph schema a source reports about the data flowing
+through it — node/relation labels, their properties, and property-type hints —
+or `null` when the source exists but doesn't describe one. Sources implement this
+on a best-effort basis via `Source::describe_schema()`; the schema is
+informational, not enforced ([drasi-core#416](https://github.com/drasi-project/drasi-core/pull/416)).
+Throws if `id` is not a known source.
+
+`SourceSchema`:
+
+```ts
+{
+  nodes: Array<{ label: string, properties: PropertySchema[] }>,
+  relations: Array<{ label: string, from?: string, to?: string, properties: PropertySchema[] }>,
+}
+// PropertySchema: { name: string, dataType?: 'string'|'integer'|'float'|'boolean'|'timestamp'|'json', description?: string }
+```
+
+> Distinct from `sourceConfigSchema(kind)` — that returns a plugin's
+> **configuration** schema; this returns the **graph data** schema of a running
+> source instance.
+
+### `getGraphSchema()` → `Promise<GraphSchema>`
+
+Return the merged graph schema across all sources and queries: for each
+node/relation label, which sources provide it and which queries reference it,
+plus known properties, and any sources that exist but couldn't describe a schema.
+Useful for inspection, validation, and LLM/MCP tooling
+([drasi-core#416](https://github.com/drasi-project/drasi-core/pull/416)).
+
+`GraphSchema`:
+
+```ts
+{
+  nodes: Record<string, { sources: string[], queriedBy: string[], properties: PropertySchema[] }>,
+  relations: Record<string, { sources: string[], queriedBy: string[], from?: string, to?: string, properties: PropertySchema[] }>,
+  sourcesWithoutSchema: string[],
+}
+```
+
 ---
 
 ## Queries
 
-### `addQuery(id, query, sources, language?, joins?)` → `Promise<void>`
+### `addQuery(id, query, sources, language?, joins?, middleware?)` → `Promise<void>`
 
 Add a continuous query.
 
@@ -292,16 +338,42 @@ Add a continuous query.
 | --- | --- | --- | --- |
 | `id` | `string` | — | Query id. |
 | `query` | `string` | — | Cypher or GQL text. |
-| `sources` | `string[]` | — | Source ids the query reads from. |
-| `language` | `string?` | `"cypher"` | `"gql"` selects GQL; `"cypher"` (or omitted) selects Cypher. **Any other value (including typos) is now rejected synchronously with a typed `UNKNOWN_QUERY_LANGUAGE` error** (audit gap G10, resolved). |
+| `sources` | `Array<string \| SourceSubscription>` | — | Sources the query reads from. Each entry is a bare source-id `string`, or a `{ id, pipeline? }` object whose `pipeline` is an ordered list of middleware `name`s applied to that source's changes before they reach the query. |
+| `language` | `string?` | `"cypher"` | `"gql"` selects GQL; `"cypher"` (or omitted) selects Cypher. **Any other value (including typos) is rejected synchronously with a typed `UNKNOWN_QUERY_LANGUAGE` error** (audit gap G10, resolved). |
 | `joins` | `QueryJoin[]?` | — | `[{ id, keys: [{ label, property }] }]` synthetic joins relating elements across sources with no explicit relationship. |
+| `middleware` | `QueryMiddleware[]?` | — | Middleware definitions (`[{ kind, name, config? }]`) that source `pipeline`s reference by `name`. `kind` selects a compiled-in factory: `map`, `unwind`, `parse_json`, `promote`, `relabel`, `decoder`. `config` (default `{}`) is middleware-specific. |
 
-**Errors:** invalid `joins` JSON fails to deserialize; engine `add_query` errors
-propagate.
+Source middleware transforms changes on their way from a source into the query
+(relabel nodes, unwind arrays into child elements, parse embedded JSON, promote
+nested fields, etc.). Middleware is **query-scoped**: define it in `middleware`
+and reference it by `name` from a source's `pipeline`; pipeline order is
+significant.
 
-### `updateQuery(id, query, sources, language?, joins?)` → `Promise<void>`
+```js
+await drasi.addQuery(
+  'people',
+  'MATCH (p:Person) RETURN p.name AS name',
+  [{ id: 'raw', pipeline: ['raw-to-person'] }],
+  'cypher',
+  undefined,
+  [{ kind: 'relabel', name: 'raw-to-person', config: { labelMappings: { Raw: 'Person' } } }],
+);
+```
 
-Replace a query definition in place. Same parameters/semantics as `addQuery`.
+> **Note:** `jq` middleware is **not** compiled in (it needs a native libjq); the
+> six pure-Rust kinds above are always available.
+
+**Errors (synchronous, typed `err.code`):** `UNKNOWN_QUERY_LANGUAGE` (bad
+`language`); `QUERY_SOURCE_INVALID` (a `sources` entry is not a string or a valid
+`{ id, pipeline? }` object); `MIDDLEWARE_INVALID` (a `middleware` entry is missing
+`kind`/`name` or has a non-object `config`); `UNKNOWN_MIDDLEWARE_REF` (a `pipeline`
+names a middleware not defined in `middleware`). Invalid `joins` JSON and engine
+`add_query` errors propagate asynchronously.
+
+### `updateQuery(id, query, sources, language?, joins?, middleware?)` → `Promise<void>`
+
+Replace a query definition in place. Same parameters/semantics as `addQuery`
+(including source `pipeline`s and query `middleware`).
 
 ### `startQuery(id)` / `stopQuery(id)` → `Promise<void>`
 

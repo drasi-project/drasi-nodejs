@@ -1,0 +1,22 @@
+{{/*
+  Project head-end hook.
+
+  1. Default to light mode unless the visitor has explicitly chosen a theme.
+     Runs after Docsy's inline theme script so the initial paint matches the
+     light default and avoids a flash of dark mode on OS-dark devices.
+  2. Load the Drasi brand fonts: Inter for body text, JetBrains Mono for code
+     (referenced by assets/scss/_variables_project.scss).
+*/}}
+<script>
+  (function () {
+    try {
+      if (!localStorage.getItem('td-color-theme')) {
+        document.documentElement.setAttribute('data-bs-theme', 'light');
+      }
+    } catch (e) { /* localStorage unavailable; leave default theme */ }
+  })();
+</script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">

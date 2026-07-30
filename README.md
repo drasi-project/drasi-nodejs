@@ -3,6 +3,10 @@
 [![npm version](https://img.shields.io/npm/v/@drasi/lib)](https://www.npmjs.com/package/@drasi/lib)
 [![npm downloads](https://img.shields.io/npm/dm/@drasi/lib)](https://www.npmjs.com/package/@drasi/lib)
 [![license](https://img.shields.io/npm/l/@drasi/lib)](./LICENSE)
+[![docs](https://img.shields.io/badge/docs-drasi--project.github.io-blue)](https://drasi-project.github.io/drasi-nodejs/)
+
+📖 **Documentation: <https://drasi-project.github.io/drasi-nodejs/>** — installation,
+concepts, the full API reference, guides, and an end-to-end tutorial.
 
 Embed the [Drasi](https://drasi.io) continuous-query engine directly in your
 Node.js application. `@drasi/lib` is a native ([napi-rs](https://napi.rs))
@@ -104,31 +108,65 @@ See [`examples/`](./examples) for runnable scripts (`quickstart.mjs`,
 React desktop app that browses/installs plugins and builds and observes a topology
 on the embedded engine.
 
+## Transform changes with source middleware
+
+A query can run **source middleware** over a source's changes before they reach it.
+Define middleware on the query (`[{ kind, name, config? }]`) and reference it by
+`name` from a source's `pipeline`. Six pure-Rust kinds are compiled in: `map`,
+`unwind`, `parse_json`, `promote`, `relabel`, `decoder` (`jq` is not — it needs a
+native libjq). Pipeline order is significant.
+
+```js
+await drasi.addJsSource('raw');
+await drasi.addQuery(
+  'people',
+  'MATCH (p:Person) RETURN p.name AS name',
+  [{ id: 'raw', pipeline: ['raw-to-person'] }],           // per-source pipeline
+  'cypher',
+  undefined,                                              // joins
+  [{ kind: 'relabel', name: 'raw-to-person', config: { labelMappings: { Raw: 'Person' } } }],
+);
+
+// A `Raw` node is relabeled to `Person` by the pipeline, so the query matches it.
+await drasi.pushChange('raw', { op: 'insert', id: 'p1', labels: ['Raw'], properties: { name: 'alice' } });
+```
+
+Bare-string `sources` (no middleware) keep working: `sources` accepts
+`string | { id, pipeline? }` entries. The same shape is available on
+`updateQuery` and in `Drasi.fromConfig`'s `queries[]`.
+
 ## API overview
+
+> The full, browsable API reference lives on the
+> [documentation site](https://drasi-project.github.io/drasi-nodejs/docs/api/). The
+> summary below is a quick reference.
 
 `Drasi.create(id, options?)` → `Promise<Drasi>`. `options.secrets` seeds an
 in-memory secret store (`{ secrets: { DB_PASSWORD: '…' } }`) that cdylib plugins
 resolve `ConfigValue::Secret`/`EnvironmentVariable` references against;
 `options.stateStore` (`{ kind: 'redb', path }`) enables a persistent plugin state store.
 `Drasi.fromConfig(config)` builds **and starts** an engine from a declarative
-object (see [`docs/api-reference.md`](./docs/api-reference.md) for the full,
-method-by-method reference).
+object (see the [API reference](https://drasi-project.github.io/drasi-nodejs/docs/api/),
+or [`docs/api-reference.md`](./docs/api-reference.md) for the audit-oriented deep dive).
 
 | Area | Methods |
 | --- | --- |
 | Plugins | `loadPlugins(dir, verify?)`, `watchPlugins(dir)`, `pluginKinds()`, `sourceConfigSchema(kind)`, `reactionConfigSchema(kind)`, `bootstrapConfigSchema(kind)`, `listPluginTags(repo)`, `pullPlugin(reference, destDir, filename, options?)` |
-| Sources | `addSource(kind, id, config, autoStart?, bootstrap?)`, `addJsSource(id, autoStart?)`, `pushChange(sourceId, change)`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources` |
-| Queries | `addQuery(id, query, sources, language?, joins?)`, `updateQuery`, `startQuery`, `stopQuery`, `removeQuery`, `getQueryResults(id)`, `listQueries` |
+| Sources | `addSource(kind, id, config, autoStart?, bootstrap?)`, `addJsSource(id, autoStart?)`, `pushChange(sourceId, change)`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources`, `getSourceSchema(id)`, `getGraphSchema()` |
+| Queries | `addQuery(id, query, sources, language?, joins?, middleware?)`, `updateQuery`, `startQuery`, `stopQuery`, `removeQuery`, `getQueryResults(id)`, `listQueries` |
 | Reactions | `addReaction(kind, id, queryIds, config)`, `addJsReaction(id, queryIds, cb)`, `addDurableJsReaction(id, queryIds, asyncCb, options?)`, `updateReaction`, `startReaction`, `stopReaction`, `removeReaction`, `listReactions` |
 | Metrics | `getQueryMetrics(id)`, `getReactionMetrics(id)`, `getLifecycleMetrics()` |
 | Streaming | `onAllEvents(cb)`, `onQueryEvents(id, cb)`, `onSourceEvents(id, cb)`, `onReactionEvents(id, cb)`, `onSourceLogs(id, cb)`, `onQueryLogs(id, cb)`, `onReactionLogs(id, cb)` |
 | Lifecycle | `start()`, `stop()`, `close()` |
 
 `language` is `"cypher"` (default) or `"gql"` — any other value is rejected with a
-typed `UNKNOWN_QUERY_LANGUAGE` error. `pushChange` emits nodes, or
-**relations** when `change` includes `startId`/`endId`. Generated TypeScript types
-are in `index.d.ts`. Callbacks are unref'd, so they don't keep the Node process
-alive on their own.
+typed `UNKNOWN_QUERY_LANGUAGE` error. A query's `sources` accept source-id strings
+or `{ id, pipeline? }` objects, and an optional `middleware` array defines the
+transformations pipelines reference (see [Transform changes with source
+middleware](#transform-changes-with-source-middleware)). `pushChange` emits nodes,
+or **relations** when `change` includes `startId`/`endId`. Generated TypeScript
+types are in `index.d.ts`. Callbacks are unref'd, so they don't keep the Node
+process alive on their own.
 
 ### Ordering tip
 
@@ -231,9 +269,11 @@ streaming, secret/env config resolution for plugins, bootstrap-provider wiring,
 persistent state store (redb) and persistent query-index backend (RocksDB),
 identity providers, plugin hot-reload, lifecycle/update APIs, concrete public
 TypeScript types with typed error codes (`DrasiErrorCode`), plugin config-schema
-accessors with tokenized config-validation errors, query-language validation, and
-metrics accessors. Published to npm with cross-platform prebuilt binaries and
-build provenance (see [`docs/releasing.md`](./docs/releasing.md)).
+accessors with tokenized config-validation errors, query-language validation,
+source middleware for query writers (per-source pipelines + query-scoped
+middleware definitions), and metrics accessors. Published to npm with
+cross-platform prebuilt binaries and build provenance (see
+[`docs/releasing.md`](./docs/releasing.md)).
 
 Still to come:
 
@@ -248,6 +288,29 @@ Adoption is tracked via npm downloads and dependents. See
 [`docs/metrics.md`](./docs/metrics.md) for how to read the numbers — the public
 npm downloads API, npmjs.com Insights/dependents, and third-party dashboards —
 plus the baseline and where to record targets.
+
+## Publishing
+
+`@drasi/lib` is published to **public npm** as the source of truth for
+open-source consumers:
+
+```bash
+npm run pack:verify     # inspect the tarball contents (npm pack --dry-run)
+npm run publish:public  # npm publish --access public (normally done by CI on a vX.Y.Z tag)
+```
+
+Maintainers can **optionally** also publish the same version to an internal
+**Azure Artifacts** feed for Microsoft-internal consumption (e.g. to avoid the
+~7-day quarantine delay for newly published public versions on corp-managed
+machines). This is additive and never required for an OSS release:
+
+```bash
+AZURE_ARTIFACTS_REGISTRY_URL=<feed-url> npm run publish:internal
+```
+
+No credentials are committed — authenticate with your normal npm / Azure
+Artifacts auth. See [`docs/releasing.md`](./docs/releasing.md) for the full
+dual-publish model, the `.npmrc` templates, CI setup, and the release runbook.
 
 ## License
 

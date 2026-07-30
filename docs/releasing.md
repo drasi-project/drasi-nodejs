@@ -127,6 +127,167 @@ Once the one-time prerequisites below are done, cutting a release is:
 8. (Optional) Install into a scratch project on each OS to confirm the prebuilt
    binary resolves with no Rust toolchain present.
 
+## Dual publish: public npm + internal Azure Artifacts
+
+`@drasi/lib` supports an **optional** second publish target — an internal
+[Azure Artifacts](https://learn.microsoft.com/azure/devops/artifacts/) npm feed —
+in addition to the public npm registry.
+
+### Publishing model
+
+- **Public npm is the source of truth** for all open-source consumers. Public
+  releases are unchanged by the internal path.
+- **Internal Azure Artifacts is optional and additive**, intended only for
+  Microsoft-internal consumption. It is never required to cut an OSS release.
+- The internal path exists because, on Microsoft-managed machines, a newly
+  published *public* npm version can be unavailable for roughly **7 days**
+  through the corp/quarantine path. Publishing the same version to an internal
+  feed gives internal users a tighter loop without waiting on quarantine.
+- **No credentials are ever committed.** Maintainers authenticate locally with
+  their normal npm / Azure Artifacts auth, and CI uses repo/environment secrets.
+- **Feed setup is managed separately** from this repo. Azure Artifacts guidance
+  is to expose a **single feed URL** with upstream sources configured on the feed
+  (so npmjs.org is reachable through the one feed) rather than scattering multiple
+  registries in client config.
+- **Consuming repos are out of scope.** Internal consumers point their install
+  config at the internal feed; that is configured in those repos, not here.
+
+### Why registry routing needs care here (napi multi-package)
+
+This repo publishes the main `@drasi/lib` package **and** the per-platform
+`@drasi/lib-<platform>` packages. The per-platform packages are published by the
+`prepublishOnly` hook (`napi prepublish -t npm`), which runs a bare `npm publish`
+in each generated `npm/<platform>` directory. Those child publishes only read
+**ambient** npm configuration (npm config files and the process environment) —
+they do **not** see a `--registry` flag passed to the outer `npm publish`.
+
+Consequences, and how we handle them:
+
+- **Route via ambient config, not a CLI flag.** To keep every package on the
+  same feed, set the registry through `.npmrc` or the `npm_config_registry`
+  environment variable. `npm run publish:internal` does this for you (it sets
+  `npm_config_registry` in the environment so the main and per-platform publishes
+  agree). A plain `npm publish --registry <url>` would split packages across
+  registries and is intentionally **not** how the internal script works.
+- **`publishConfig.registry` is deliberately unset.** Do **not** add a
+  `registry` to `publishConfig` in `package.json`: it would be inherited by every
+  per-platform package and hard-wire the publish target, breaking the flexible
+  public/internal split and interfering with auth. The current config only sets
+  `access` and `provenance`.
+- **Provenance is public-npm only.** [npm provenance](https://docs.npmjs.com/generating-provenance-statements)
+  is generated via OIDC when publishing to `registry.npmjs.org`; Azure Artifacts
+  does not support it. The internal path disables provenance
+  (`publish:internal` sets `npm_config_provenance=false`); the public path keeps
+  it on.
+- **Scoped-package caveat.** Every package here is under the `@drasi` scope, so a
+  scope mapping like `@drasi:registry=<url>` in an `.npmrc` would override the
+  default registry for **all** `@drasi/*` packages — including a later public
+  release — and silently reroute it. Prefer the plain `registry=` key in the
+  example `.npmrc` templates, and remove any stray `.npmrc` before a public
+  release. A real `.npmrc` is gitignored so it is never committed.
+
+### Scripts
+
+[`package.json`](../package.json) exposes explicit, single-purpose publish
+scripts:
+
+| Script                   | What it does                                                        |
+| ------------------------ | ------------------------------------------------------------------- |
+| `npm run pack:verify`    | `npm pack --dry-run` — inspect the main package's tarball contents. |
+| `npm run publish:public` | `npm publish --access public` — publish to public npm (default).    |
+| `npm run publish:internal` | Publish to an internal feed via `scripts/publish-internal.mjs`.   |
+
+`publish:internal` requires a feed URL (`AZURE_ARTIFACTS_REGISTRY_URL` or
+`--registry <url>`), refuses to run against `registry.npmjs.org`, and forwards
+extra args (e.g. `-- --dry-run`, `-- --tag next`). Auth is **not** handled by the
+script — authenticate to the feed out of band first.
+
+### Example `.npmrc` templates
+
+Two committed templates document the two targets — copy one to a real `.npmrc`
+(gitignored) if you want to pin the registry locally:
+
+- [`.npmrc.publish-public.example`](../.npmrc.publish-public.example)
+- [`.npmrc.publish-internal.example`](../.npmrc.publish-internal.example)
+
+You usually do **not** need a local `.npmrc` for public publishing — npm defaults
+to the public registry.
+
+### Runbook: public npm publish
+
+This is the normal OSS release and is fully automated (see _The release
+pipeline_ above): bump the version, update the changelog, and push a `vX.Y.Z`
+tag. The `publish` job runs `npm publish --access public` with provenance. To
+verify a build locally without publishing, use `npm run pack:verify`.
+
+### Runbook: internal Azure Artifacts publish (optional)
+
+Prerequisites (one-time, managed outside this repo):
+
+1. An Azure Artifacts npm feed exists, with upstream sources configured so it can
+   also serve public packages.
+2. You have publish rights and are authenticated. Locally, e.g.:
+
+   ```bash
+   npx vsts-npm-auth -config .npmrc          # writes creds to your USER ~/.npmrc
+   # (or add an _authToken / _password line to your USER-level ~/.npmrc)
+   ```
+
+To publish the **main** package to the feed from a local checkout:
+
+```bash
+export AZURE_ARTIFACTS_REGISTRY_URL="https://pkgs.dev.azure.com/ORG/PROJECT/_packaging/FEED/npm/registry/"
+npm run build                 # produce index.js / index.d.ts first
+npm run publish:internal -- --dry-run   # rehearse
+npm run publish:internal
+```
+
+> **Note on per-platform packages locally.** A local checkout only has the
+> `.node` binary for *your* platform, so a local `publish:internal` publishes the
+> main package (and at most your platform's package). To publish **all**
+> per-platform packages to the feed, use the CI job below, which assembles every
+> prebuilt binary first.
+
+In CI, prefer the optional `publish-internal` job in
+[`release.yml`](../.github/workflows/release.yml): it downloads all build
+artifacts, assembles the per-platform packages, and publishes them together to
+the feed. Enable it either by running the **Release** workflow via
+`workflow_dispatch` with `publish_internal = true`, or, for tag pushes, by
+setting the repo/environment variable `ENABLE_INTERNAL_PUBLISH=true`. It requires:
+
+- secret `AZURE_ARTIFACTS_TOKEN` — a PAT with publish rights to the feed
+- variable `AZURE_ARTIFACTS_REGISTRY_URL` — the feed's npm registry URL
+
+The public `publish` job is completely independent of this job.
+
+### Recommended dual-publish sequence
+
+1. **Verify** the package contents: `npm run pack:verify`.
+2. **Publish to public npm** (push the `vX.Y.Z` tag) — this is the source of
+   truth. Confirm it succeeded: `npm view @drasi/lib@X.Y.Z`.
+3. **Optionally publish the same version internally** — run the **Release**
+   workflow via `workflow_dispatch` with `publish_internal = true` (same commit /
+   tag), or run `npm run publish:internal` locally.
+4. **Verify availability in both locations** — `npm view @drasi/lib@X.Y.Z`
+   against public npm, and an authenticated `npm view @drasi/lib@X.Y.Z
+   --registry <feed>` against the internal feed.
+
+Constraints and failure handling:
+
+- **Versions must match.** Publish the *same* `X.Y.Z` to both targets; never fork
+  version numbers between public and internal.
+- **Duplicate publishes are rejected.** Re-publishing an existing version fails
+  with "You cannot publish over the previously published versions." `napi
+  prepublish` treats that as already-published and skips it, so re-running after a
+  partial failure is safe and idempotent for packages that already landed.
+- **If public succeeds but internal fails**, the release is still valid — public
+  npm is the source of truth. Fix the feed/auth issue and re-run only the internal
+  publish (it will skip anything already published). **Never** bump the version or
+  re-publish to public just to satisfy the internal feed.
+- **If internal succeeds but public fails**, treat the public publish as the
+  blocker: resolve it and complete the public release; the internal copy already
+  matches the intended version.
+
 ## First stable publish (team#95) — remaining human steps
 
 **These require credentials/org access and an explicit go-ahead, and have _not_
