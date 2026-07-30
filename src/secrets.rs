@@ -43,7 +43,7 @@ use drasi_plugin_sdk::ConfigValue as SdkConfigValue;
 /// `SecretStoreProvider` from the selected plugin and writes to the shared
 /// `inner` `RwLock` that was handed to the resolver thread at startup.
 pub struct SwappableSecretStoreProvider {
-    pub inner: Arc<RwLock<Arc<dyn SecretStoreProvider>>>,
+    pub(crate) inner: Arc<RwLock<Arc<dyn SecretStoreProvider>>>,
 }
 
 #[async_trait]
