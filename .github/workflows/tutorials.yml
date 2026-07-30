@@ -1,0 +1,65 @@
+# Validate the runnable tutorials: generated READMEs are up to date and each
+# tutorial app installs and passes a lightweight smoke test. A full end-to-end
+# run (Postgres + OCI plugin download) is intentionally out of scope for CI.
+name: Tutorials
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "tutorials/**"
+      - "scripts/render-tutorials.py"
+      - ".github/workflows/tutorials.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "tutorials/**"
+      - "scripts/render-tutorials.py"
+      - ".github/workflows/tutorials.yml"
+
+jobs:
+  render-check:
+    name: Generated READMEs up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify tutorial READMEs match _index.md
+        run: python3 scripts/render-tutorials.py --check
+
+  building-comfort:
+    name: Building Comfort — smoke test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tutorials/building-comfort
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: npm install
+      - name: Syntax-check all modules
+        run: node --check src/index.mjs && for f in src/*.mjs queries.mjs; do node --check "$f"; done
+      - name: Handlebars snapshot shaping produces valid JSON
+        run: |
+          node --input-type=module -e "
+            import assert from 'node:assert';
+            import { renderSnapshot } from './src/templates.mjs';
+            const ui = [
+              { RoomId:'room_01_01_01', RoomName:'Room 01', FloorId:'floor_01_01', FloorName:'Floor 01', BuildingName:'B', Temperature:70, Humidity:40, CO2:10, ComfortLevel:46 },
+              { RoomId:'room_01_01_02', RoomName:'Room 02', FloorId:'floor_01_01', FloorName:'Floor 01', BuildingName:'B', Temperature:82, Humidity:40, CO2:10, ComfortLevel:58 },
+            ];
+            const snap = renderSnapshot({ ui, floorComfort:[{FloorId:'floor_01_01',ComfortLevel:52}], roomAlerts:[], floorAlerts:[] });
+            assert.equal(snap.floors.length, 1);
+            assert.equal(snap.floors[0].rooms[1].status, 'hot');
+            assert.equal(snap.overallComfort, 52);
+            // Empty input must still produce valid JSON.
+            const empty = renderSnapshot({ ui:[], floorComfort:[], roomAlerts:[], floorAlerts:[] });
+            assert.equal(empty.floors.length, 0);
+            console.log('✅ snapshot shaping ok');
+          "

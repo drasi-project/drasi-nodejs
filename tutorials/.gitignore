@@ -1,0 +1,7 @@
+# Dependencies and build output for the runnable tutorials.
+**/node_modules/
+**/bin/
+**/.env
+
+# Local plugin cache (Drasi source/bootstrap plugins pulled from the OCI registry).
+**/.drasi-plugins/
