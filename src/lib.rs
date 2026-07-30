@@ -15,6 +15,7 @@ mod components;
 mod conversions;
 mod drasi;
 mod error;
+mod retry;
 mod secrets;
 mod types;
 mod verification;
