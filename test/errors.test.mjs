@@ -356,3 +356,84 @@ test('relations accept inId/outId aliases and propagate deletes', async () => {
   assert.equal(cleared.length, 0, 'relation delete propagated');
   await d.close();
 });
+
+// ---------------------------------------------------------------------------
+// Query source-pipeline and middleware validation (synchronous typed codes)
+// ---------------------------------------------------------------------------
+
+test('addQuery rejects a pipeline referencing an undefined middleware', async () => {
+  const d = await Drasi.create('t-mw-unknown-ref');
+  await d.start();
+  await d.addJsSource('s');
+  await rejectsWithCode(
+    () => d.addQuery('q', 'MATCH (n) RETURN n', [{ id: 's', pipeline: ['missing'] }]),
+    'UNKNOWN_MIDDLEWARE_REF',
+    /undefined middleware 'missing'/,
+  );
+  // Defining the middleware makes the same call succeed.
+  await d.addQuery(
+    'q',
+    'MATCH (n) RETURN n',
+    [{ id: 's', pipeline: ['present'] }],
+    'cypher',
+    undefined,
+    [{ kind: 'relabel', name: 'present', config: { labelMappings: { A: 'B' } } }],
+  );
+  await d.close();
+});
+
+test('addQuery rejects a malformed middleware entry with MIDDLEWARE_INVALID', async () => {
+  const d = await Drasi.create('t-mw-invalid');
+  await d.start();
+  await d.addJsSource('s');
+  // Missing `kind`.
+  await rejectsWithCode(
+    () => d.addQuery('q', 'MATCH (n) RETURN n', ['s'], 'cypher', undefined, [{ name: 'm' }]),
+    'MIDDLEWARE_INVALID',
+    /missing a string 'kind'/,
+  );
+  // Missing `name`.
+  await rejectsWithCode(
+    () => d.addQuery('q', 'MATCH (n) RETURN n', ['s'], 'cypher', undefined, [{ kind: 'promote' }]),
+    'MIDDLEWARE_INVALID',
+    /missing a string 'name'/,
+  );
+  await d.close();
+});
+
+test('addQuery rejects a malformed source entry with QUERY_SOURCE_INVALID', async () => {
+  const d = await Drasi.create('t-src-invalid');
+  await d.start();
+  await d.addJsSource('s');
+  // Object source missing `id`.
+  await rejectsWithCode(
+    () => d.addQuery('q', 'MATCH (n) RETURN n', [{ pipeline: ['x'] }]),
+    'QUERY_SOURCE_INVALID',
+    /missing a string 'id'/,
+  );
+  // `pipeline` is not an array of strings.
+  await rejectsWithCode(
+    () => d.addQuery('q', 'MATCH (n) RETURN n', [{ id: 's', pipeline: [1, 2] }]),
+    'QUERY_SOURCE_INVALID',
+    /pipeline/,
+  );
+  await d.close();
+});
+
+test('fromConfig rejects an undefined middleware reference with UNKNOWN_MIDDLEWARE_REF', async () => {
+  await rejectsWithCode(
+    () =>
+      Drasi.fromConfig({
+        id: 'cfg-mw-badref',
+        queries: [
+          {
+            id: 'q',
+            query: 'MATCH (n) RETURN n',
+            sources: [{ id: 's', pipeline: ['nope'] }],
+          },
+        ],
+      }),
+    'UNKNOWN_MIDDLEWARE_REF',
+    /undefined middleware 'nope'/,
+  );
+});

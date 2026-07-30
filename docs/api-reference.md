@@ -116,12 +116,17 @@ and reaction (which auto-start on the running engine).
 - `secrets?`, `stateStore?`, `indexStore?`, `identity?` — forwarded to `create`.
 - `pluginsDir?: string` — if present, `loadPlugins(pluginsDir)` runs before start.
 - `sources?: Array<{ kind, id, config?, autoStart?, bootstrap? }>`
-- `queries?: Array<{ id, query, sources, language?, joins? }>`
+- `queries?: Array<{ id, query, sources, language?, joins?, middleware? }>` — `sources`
+  entries are each a source-id `string` or a `{ id, pipeline? }` object, and
+  `middleware?` is an array of `{ kind, name, config? }` definitions (see
+  [`addQuery`](#addqueryid-query-sources-language-joins-middleware--promisevoid)).
 - `reactions?: Array<{ kind, id, queries, config? }>`
 
 **Errors:** `config entry is missing '<key>'` when a required field (`kind`/`id`
-for sources/reactions, `id`/`query` for queries) is absent, plus any error from
-the underlying `add*`/`loadPlugins`/`start` calls.
+for sources/reactions, `id`/`query` for queries) is absent; the same synchronous
+typed codes as `addQuery` (`UNKNOWN_QUERY_LANGUAGE`, `QUERY_SOURCE_INVALID`,
+`MIDDLEWARE_INVALID`, `UNKNOWN_MIDDLEWARE_REF`); plus any error from the underlying
+`add*`/`loadPlugins`/`start` calls.
 
 ---
 
@@ -325,7 +330,7 @@ Useful for inspection, validation, and LLM/MCP tooling
 
 ## Queries
 
-### `addQuery(id, query, sources, language?, joins?)` → `Promise<void>`
+### `addQuery(id, query, sources, language?, joins?, middleware?)` → `Promise<void>`
 
 Add a continuous query.
 
@@ -333,16 +338,42 @@ Add a continuous query.
 | --- | --- | --- | --- |
 | `id` | `string` | — | Query id. |
 | `query` | `string` | — | Cypher or GQL text. |
-| `sources` | `string[]` | — | Source ids the query reads from. |
-| `language` | `string?` | `"cypher"` | `"gql"` selects GQL; `"cypher"` (or omitted) selects Cypher. **Any other value (including typos) is now rejected synchronously with a typed `UNKNOWN_QUERY_LANGUAGE` error** (audit gap G10, resolved). |
+| `sources` | `Array<string \| SourceSubscription>` | — | Sources the query reads from. Each entry is a bare source-id `string`, or a `{ id, pipeline? }` object whose `pipeline` is an ordered list of middleware `name`s applied to that source's changes before they reach the query. |
+| `language` | `string?` | `"cypher"` | `"gql"` selects GQL; `"cypher"` (or omitted) selects Cypher. **Any other value (including typos) is rejected synchronously with a typed `UNKNOWN_QUERY_LANGUAGE` error** (audit gap G10, resolved). |
 | `joins` | `QueryJoin[]?` | — | `[{ id, keys: [{ label, property }] }]` synthetic joins relating elements across sources with no explicit relationship. |
+| `middleware` | `QueryMiddleware[]?` | — | Middleware definitions (`[{ kind, name, config? }]`) that source `pipeline`s reference by `name`. `kind` selects a compiled-in factory: `map`, `unwind`, `parse_json`, `promote`, `relabel`, `decoder`. `config` (default `{}`) is middleware-specific. |
 
-**Errors:** invalid `joins` JSON fails to deserialize; engine `add_query` errors
-propagate.
+Source middleware transforms changes on their way from a source into the query
+(relabel nodes, unwind arrays into child elements, parse embedded JSON, promote
+nested fields, etc.). Middleware is **query-scoped**: define it in `middleware`
+and reference it by `name` from a source's `pipeline`; pipeline order is
+significant.
 
-### `updateQuery(id, query, sources, language?, joins?)` → `Promise<void>`
+```js
+await drasi.addQuery(
+  'people',
+  'MATCH (p:Person) RETURN p.name AS name',
+  [{ id: 'raw', pipeline: ['raw-to-person'] }],
+  'cypher',
+  undefined,
+  [{ kind: 'relabel', name: 'raw-to-person', config: { labelMappings: { Raw: 'Person' } } }],
+);
+```
 
-Replace a query definition in place. Same parameters/semantics as `addQuery`.
+> **Note:** `jq` middleware is **not** compiled in (it needs a native libjq); the
+> six pure-Rust kinds above are always available.
+
+**Errors (synchronous, typed `err.code`):** `UNKNOWN_QUERY_LANGUAGE` (bad
+`language`); `QUERY_SOURCE_INVALID` (a `sources` entry is not a string or a valid
+`{ id, pipeline? }` object); `MIDDLEWARE_INVALID` (a `middleware` entry is missing
+`kind`/`name` or has a non-object `config`); `UNKNOWN_MIDDLEWARE_REF` (a `pipeline`
+names a middleware not defined in `middleware`). Invalid `joins` JSON and engine
+`add_query` errors propagate asynchronously.
+
+### `updateQuery(id, query, sources, language?, joins?, middleware?)` → `Promise<void>`
+
+Replace a query definition in place. Same parameters/semantics as `addQuery`
+(including source `pipeline`s and query `middleware`).
 
 ### `startQuery(id)` / `stopQuery(id)` → `Promise<void>`
 

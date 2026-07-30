@@ -9,6 +9,21 @@ release process.
 
 ## [Unreleased]
 
+### Added
+
+- **Source middleware for query writers** — `addQuery`/`updateQuery` gain a trailing
+  `middleware?: { kind, name, config? }[]` argument, and their `sources` now accept
+  `string | { id, pipeline? }` entries, so a query can run source middleware over a
+  source's changes before they reach it. `pipeline` is an ordered list of middleware
+  `name`s; middleware is query-scoped and referenced by name. The same shape is
+  available in `Drasi.fromConfig`'s `queries[]`. Six pure-Rust middleware kinds are
+  compiled in (`map`, `unwind`, `parse_json`, `promote`, `relabel`, `decoder`); `jq`
+  is intentionally excluded because it requires a native libjq. New `SourceSubscription`
+  and `QueryMiddleware` TypeScript types, and new synchronous typed error codes
+  `QUERY_SOURCE_INVALID`, `MIDDLEWARE_INVALID`, and `UNKNOWN_MIDDLEWARE_REF`.
+  Backward compatible: bare-string `sources` and the previous argument arity keep
+  working.
+
 ## [0.2.0] - 2026-07-20
 
 ### Added

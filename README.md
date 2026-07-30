@@ -108,6 +108,33 @@ See [`examples/`](./examples) for runnable scripts (`quickstart.mjs`,
 React desktop app that browses/installs plugins and builds and observes a topology
 on the embedded engine.
 
+## Transform changes with source middleware
+
+A query can run **source middleware** over a source's changes before they reach it.
+Define middleware on the query (`[{ kind, name, config? }]`) and reference it by
+`name` from a source's `pipeline`. Six pure-Rust kinds are compiled in: `map`,
+`unwind`, `parse_json`, `promote`, `relabel`, `decoder` (`jq` is not — it needs a
+native libjq). Pipeline order is significant.
+
+```js
+await drasi.addJsSource('raw');
+await drasi.addQuery(
+  'people',
+  'MATCH (p:Person) RETURN p.name AS name',
+  [{ id: 'raw', pipeline: ['raw-to-person'] }],           // per-source pipeline
+  'cypher',
+  undefined,                                              // joins
+  [{ kind: 'relabel', name: 'raw-to-person', config: { labelMappings: { Raw: 'Person' } } }],
+);
+
+// A `Raw` node is relabeled to `Person` by the pipeline, so the query matches it.
+await drasi.pushChange('raw', { op: 'insert', id: 'p1', labels: ['Raw'], properties: { name: 'alice' } });
+```
+
+Bare-string `sources` (no middleware) keep working: `sources` accepts
+`string | { id, pipeline? }` entries. The same shape is available on
+`updateQuery` and in `Drasi.fromConfig`'s `queries[]`.
+
 ## API overview
 
 > The full, browsable API reference lives on the
@@ -126,17 +153,20 @@ or [`docs/api-reference.md`](./docs/api-reference.md) for the audit-oriented dee
 | --- | --- |
 | Plugins | `loadPlugins(dir, verify?)`, `watchPlugins(dir)`, `pluginKinds()`, `sourceConfigSchema(kind)`, `reactionConfigSchema(kind)`, `bootstrapConfigSchema(kind)`, `listPluginTags(repo)`, `pullPlugin(reference, destDir, filename, options?)` |
 | Sources | `addSource(kind, id, config, autoStart?, bootstrap?)`, `addJsSource(id, autoStart?)`, `pushChange(sourceId, change)`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources`, `getSourceSchema(id)`, `getGraphSchema()` |
-| Queries | `addQuery(id, query, sources, language?, joins?)`, `updateQuery`, `startQuery`, `stopQuery`, `removeQuery`, `getQueryResults(id)`, `listQueries` |
+| Queries | `addQuery(id, query, sources, language?, joins?, middleware?)`, `updateQuery`, `startQuery`, `stopQuery`, `removeQuery`, `getQueryResults(id)`, `listQueries` |
 | Reactions | `addReaction(kind, id, queryIds, config)`, `addJsReaction(id, queryIds, cb)`, `addDurableJsReaction(id, queryIds, asyncCb, options?)`, `updateReaction`, `startReaction`, `stopReaction`, `removeReaction`, `listReactions` |
 | Metrics | `getQueryMetrics(id)`, `getReactionMetrics(id)`, `getLifecycleMetrics()` |
 | Streaming | `onAllEvents(cb)`, `onQueryEvents(id, cb)`, `onSourceEvents(id, cb)`, `onReactionEvents(id, cb)`, `onSourceLogs(id, cb)`, `onQueryLogs(id, cb)`, `onReactionLogs(id, cb)` |
 | Lifecycle | `start()`, `stop()`, `close()` |
 
 `language` is `"cypher"` (default) or `"gql"` — any other value is rejected with a
-typed `UNKNOWN_QUERY_LANGUAGE` error. `pushChange` emits nodes, or
-**relations** when `change` includes `startId`/`endId`. Generated TypeScript types
-are in `index.d.ts`. Callbacks are unref'd, so they don't keep the Node process
-alive on their own.
+typed `UNKNOWN_QUERY_LANGUAGE` error. A query's `sources` accept source-id strings
+or `{ id, pipeline? }` objects, and an optional `middleware` array defines the
+transformations pipelines reference (see [Transform changes with source
+middleware](#transform-changes-with-source-middleware)). `pushChange` emits nodes,
+or **relations** when `change` includes `startId`/`endId`. Generated TypeScript
+types are in `index.d.ts`. Callbacks are unref'd, so they don't keep the Node
+process alive on their own.
 
 ### Ordering tip
 
@@ -239,9 +269,11 @@ streaming, secret/env config resolution for plugins, bootstrap-provider wiring,
 persistent state store (redb) and persistent query-index backend (RocksDB),
 identity providers, plugin hot-reload, lifecycle/update APIs, concrete public
 TypeScript types with typed error codes (`DrasiErrorCode`), plugin config-schema
-accessors with tokenized config-validation errors, query-language validation, and
-metrics accessors. Published to npm with cross-platform prebuilt binaries and
-build provenance (see [`docs/releasing.md`](./docs/releasing.md)).
+accessors with tokenized config-validation errors, query-language validation,
+source middleware for query writers (per-source pipelines + query-scoped
+middleware definitions), and metrics accessors. Published to npm with
+cross-platform prebuilt binaries and build provenance (see
+[`docs/releasing.md`](./docs/releasing.md)).
 
 Still to come:
 
