@@ -100,10 +100,38 @@ pub struct SourceConfig {
 pub struct QueryConfig {
     pub id: String,
     pub query: String,
-    pub sources: Vec<String>,
+    #[napi(ts_type = "Array<string | SourceSubscription>")]
+    pub sources: Value,
     #[napi(ts_type = "'cypher' | 'gql'")]
     pub language: Option<String>,
     pub joins: Option<Vec<QueryJoin>>,
+    pub middleware: Option<Vec<QueryMiddleware>>,
+}
+
+/// A per-query source subscription with an optional middleware pipeline.
+///
+/// Used wherever a query lists its `sources`. A bare `string` is shorthand for
+/// `{ id }` with no pipeline. `pipeline` is an ordered list of middleware `name`s
+/// (defined in the query's `middleware`) applied to changes from this source
+/// before they reach the query; order is significant.
+#[napi(object)]
+pub struct SourceSubscription {
+    pub id: String,
+    pub pipeline: Option<Vec<String>>,
+}
+
+/// A middleware definition registered on a query and referenced by `name` from a
+/// source subscription's `pipeline`.
+///
+/// `kind` selects a compiled-in middleware factory (`map`, `unwind`, `parse_json`,
+/// `promote`, `relabel`, `decoder`); `name` is the identifier used in pipelines;
+/// `config` is the middleware-specific configuration (defaults to `{}`).
+#[napi(object)]
+pub struct QueryMiddleware {
+    pub kind: String,
+    pub name: String,
+    #[napi(ts_type = "Record<string, unknown>")]
+    pub config: Option<Value>,
 }
 
 /// A declarative reaction entry in [`DrasiConfig`].

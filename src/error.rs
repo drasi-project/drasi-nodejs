@@ -90,6 +90,12 @@ pub enum DrasiErrorCode {
     UnknownSecretStoreKind,
     #[napi(value = "UNKNOWN_IDENTITY_PROVIDER_KIND")]
     UnknownIdentityProviderKind,
+    #[napi(value = "QUERY_SOURCE_INVALID")]
+    QuerySourceInvalid,
+    #[napi(value = "MIDDLEWARE_INVALID")]
+    MiddlewareInvalid,
+    #[napi(value = "UNKNOWN_MIDDLEWARE_REF")]
+    UnknownMiddlewareRef,
 }
 
 impl DrasiErrorCode {
@@ -121,6 +127,9 @@ impl DrasiErrorCode {
             DrasiErrorCode::DurableRequiresStateStore => "DURABLE_REQUIRES_STATE_STORE",
             DrasiErrorCode::UnknownSecretStoreKind => "UNKNOWN_SECRET_STORE_KIND",
             DrasiErrorCode::UnknownIdentityProviderKind => "UNKNOWN_IDENTITY_PROVIDER_KIND",
+            DrasiErrorCode::QuerySourceInvalid => "QUERY_SOURCE_INVALID",
+            DrasiErrorCode::MiddlewareInvalid => "MIDDLEWARE_INVALID",
+            DrasiErrorCode::UnknownMiddlewareRef => "UNKNOWN_MIDDLEWARE_REF",
         }
     }
 }
@@ -226,6 +235,9 @@ mod tests {
             (DrasiErrorCode::DurableRequiresStateStore, "DURABLE_REQUIRES_STATE_STORE"),
             (DrasiErrorCode::UnknownSecretStoreKind, "UNKNOWN_SECRET_STORE_KIND"),
             (DrasiErrorCode::UnknownIdentityProviderKind, "UNKNOWN_IDENTITY_PROVIDER_KIND"),
+            (DrasiErrorCode::QuerySourceInvalid, "QUERY_SOURCE_INVALID"),
+            (DrasiErrorCode::MiddlewareInvalid, "MIDDLEWARE_INVALID"),
+            (DrasiErrorCode::UnknownMiddlewareRef, "UNKNOWN_MIDDLEWARE_REF"),
         ];
         for (code, expected) in cases {
             assert_eq!(code.as_str(), expected);
