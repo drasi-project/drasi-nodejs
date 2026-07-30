@@ -418,6 +418,10 @@ test('updateQuery can add a middleware pipeline to an existing query', async () 
   await d.start();
   await d.addJsSource('people');
   await d.addQuery('q', 'MATCH (p:Person) RETURN p.name AS name', ['people']);
+  // The query auto-starts asynchronously on a running engine; wait until it has
+  // finished starting, otherwise the reconfigure is rejected with "Cannot
+  // reconfigure component 'q' while it is starting".
+  await waitUntil(async () => (await d.listQueries()).some((q) => q.id === 'q' && q.status === 'Running'));
   // Replace the definition to add the relabel middleware + pipeline.
   await d.updateQuery(
     'q',
