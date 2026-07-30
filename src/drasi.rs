@@ -288,12 +288,11 @@ impl Drasi {
                 .map_err(|r| throw_coded(env, r.code, r.message))?;
             // `sources` accepts `string | { id, pipeline? }` entries; `middleware`
             // is an optional `{ kind, name, config? }[]`. Parse + cross-validate
-            // synchronously so pipeline/middleware mistakes throw a typed code.
-            let srcs = q
-                .get("sources")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
+            // synchronously so pipeline/middleware mistakes throw a typed code. A
+            // present-but-non-array `sources` is a typed error rather than a silent
+            // empty list.
+            let srcs = query_sources_from_config(q.get("sources"))
+                .map_err(|r| throw_coded(env, r.code, r.message))?;
             let middleware = q.get("middleware").cloned();
             let parts = parse_query_parts(srcs, middleware)
                 .map_err(|r| throw_coded(env, r.code, r.message))?;
@@ -1612,6 +1611,23 @@ struct ParsedQueryParts {
     middleware: Vec<SourceMiddlewareConfig>,
 }
 
+/// Extract a query's `sources` value from a declarative `fromConfig` entry into
+/// the `Vec<Value>` [`parse_query_sources`] expects. An absent or `null` value
+/// means "no sources"; a present-but-non-array value is a typed
+/// `QUERY_SOURCE_INVALID` error rather than a silent empty list. (The
+/// `addQuery`/`updateQuery` paths receive `Vec<Value>` directly, so napi already
+/// rejects a non-array there at the FFI boundary.)
+fn query_sources_from_config(value: Option<&Value>) -> Result<Vec<Value>, CodedReason> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => Ok(items.clone()),
+        Some(_) => Err(CodedReason::new(
+            DrasiErrorCode::QuerySourceInvalid,
+            "query 'sources' must be an array of source-id strings or { id, pipeline? } objects",
+        )),
+    }
+}
+
 /// Parse the query `sources` argument: an array whose entries are each either a
 /// bare source-id `string` (no pipeline) or an object `{ id, pipeline? }`, where
 /// `pipeline` is an ordered array of middleware-name strings.
@@ -1971,6 +1987,23 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn query_sources_from_config_defaults_and_validates() {
+        // Absent or null -> empty (backward compatible).
+        assert!(query_sources_from_config(None).unwrap().is_empty());
+        assert!(query_sources_from_config(Some(&Value::Null)).unwrap().is_empty());
+        // An array passes through unchanged.
+        let arr = json!(["a", { "id": "b", "pipeline": ["m"] }]);
+        assert_eq!(query_sources_from_config(Some(&arr)).unwrap(), vals(arr.clone()));
+        // A present-but-non-array value is a typed error, not a silent empty list.
+        for bad in [json!("s"), json!({ "id": "s" }), json!(42)] {
+            assert_eq!(
+                query_sources_from_config(Some(&bad)).unwrap_err().code,
+                DrasiErrorCode::QuerySourceInvalid
+            );
+        }
     }
 
     #[test]

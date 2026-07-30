@@ -437,3 +437,17 @@ test('fromConfig rejects an undefined middleware reference with UNKNOWN_MIDDLEWA
     /undefined middleware 'nope'/,
   );
 });
+
+test('fromConfig rejects a non-array query sources with QUERY_SOURCE_INVALID', async () => {
+  // A present-but-non-array `sources` must throw synchronously rather than
+  // silently becoming an empty source list.
+  await rejectsWithCode(
+    () =>
+      Drasi.fromConfig({
+        id: 'cfg-src-nonarray',
+        queries: [{ id: 'q', query: 'MATCH (n) RETURN n', sources: 's' }],
+      }),
+    'QUERY_SOURCE_INVALID',
+    /must be an array/,
+  );
+});
