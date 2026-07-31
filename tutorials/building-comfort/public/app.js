@@ -25,7 +25,7 @@ const dom = {
 };
 
 // One live map per SSE stream, keyed by row id.
-const STREAMS = ["rooms", "room-alerts"];
+const STREAMS = ["rooms", "floor-comfort", "building", "room-alerts", "floor-alerts"];
 const state = Object.fromEntries(STREAMS.map((s) => [s, new Map()]));
 
 const cards = new Map(); // roomId -> { root, refs }
@@ -54,9 +54,7 @@ async function post(url, body) {
   return res.json();
 }
 
-// ---------- Derive the building shape + rollups from the room feed ----------
-// These correspond to Drasi's aggregate queries (floor / building comfort and
-// floor alerts); we compute them here from the clean room feed.
+// ---------- Derive the building shape from the room feed ----------
 function floorsFromRooms() {
   const rooms = [...state.rooms.values()].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   const floors = new Map();
@@ -64,18 +62,12 @@ function floorsFromRooms() {
     if (!floors.has(r.floorId)) floors.set(r.floorId, { floorId: r.floorId, floorName: r.floor, rooms: [] });
     floors.get(r.floorId).rooms.push(r);
   }
-  const list = [...floors.values()].sort((a, b) => String(a.floorId).localeCompare(String(b.floorId)));
-  for (const f of list) f.comfort = avg(f.rooms.map((r) => Number(r.comfort)));
-  return list;
-}
-
-function avg(nums) {
-  const xs = nums.filter((n) => Number.isFinite(n));
-  return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+  return [...floors.values()].sort((a, b) => String(a.floorId).localeCompare(String(b.floorId)));
 }
 
 function overallComfort() {
-  return round(avg([...state.rooms.values()].map((r) => Number(r.comfort))));
+  const b = [...state.building.values()][0];
+  return b ? round(b.comfort) : null;
 }
 
 // ---------- Rendering ----------
@@ -188,23 +180,17 @@ function render() {
   }
   for (const floor of floors) for (const room of floor.rooms) updateCard(room);
 
-  // Per-floor comfort labels (computed from the floor's rooms).
-  const floorComfort = new Map(floors.map((f) => [f.floorId, f.comfort]));
+  // Per-floor comfort labels, from the floor-comfort stream.
+  const floorComfort = state["floor-comfort"];
   document.querySelectorAll(".floor__comfort").forEach((node) => {
-    const c = floorComfort.get(node.dataset.floor);
-    node.innerHTML = `comfort <b>${c == null ? "–" : round(c)}</b>`;
+    const row = floorComfort.get(node.dataset.floor);
+    node.innerHTML = `comfort <b>${row ? round(row.comfort) : "–"}</b>`;
   });
-
-  // Floor alerts: floors whose average comfort is outside the 40–50 band
-  // (this is exactly what Drasi's floor-alert aggregate query computes).
-  const floorAlerts = floors
-    .filter((f) => f.comfort != null && (f.comfort < 40 || f.comfort > 50))
-    .map((f) => ({ id: f.floorId, name: f.floorName, comfort: f.comfort }));
 
   renderAlerts(dom.roomAlerts, [...state["room-alerts"].values()], "All rooms are comfortable.", (a) =>
     `⚠️ <strong>${escapeHtml(a.name)}</strong> <code>${escapeHtml(a.id)}</code> — comfort <b>${round(a.comfort)}</b>`,
   );
-  renderAlerts(dom.floorAlerts, floorAlerts, "All floors are comfortable.", (a) =>
+  renderAlerts(dom.floorAlerts, [...state["floor-alerts"].values()], "All floors are comfortable.", (a) =>
     `⚠️ <strong>${escapeHtml(a.name)}</strong> — comfort <b>${round(a.comfort)}</b>`,
   );
 }

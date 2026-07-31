@@ -303,10 +303,11 @@ There are six queries (all defined in `queries.mjs`):
 | `floor-alert` | Only the floors whose average comfort is outside 40–50 |
 | `building-alert` | The building, when its overall comfort is outside 40–50 |
 
-The SSE reaction streams the two per-entity queries — `building-comfort-ui` and `room-alert` —
-to the UI. The four **aggregate** queries demonstrate rollups; the UI computes the same floor
-and building comfort levels (and floor alerts) in the browser from the room feed. See
-[The SSE Reaction](#the-sse-reaction-kind-sse) for why.
+The SSE reaction streams five of these — the per-room feed, the per-floor and building comfort
+rollups, and the room and floor alerts — to the UI, each on its own path (`building-alert`
+isn't shown in this UI). The floor and building queries are **aggregations**: `avg()` inside a
+`WITH` rolls room comfort up to floors and the building, and the reaction streams their changes
+just like any other query.
 
 #### Synthetic joins connect the entities
 
@@ -394,7 +395,10 @@ it — no reaction code of our own required. We give each query its own `routes`
 JSON contract the UI wants:
 
 ```js
-await engine.addReaction('sse', 'building-comfort-sse', ['building-comfort-ui', 'room-alert'], {
+await engine.addReaction('sse', 'building-comfort-sse', [
+  'building-comfort-ui', 'floor-comfort-level-calc', 'building-comfort-level-calc',
+  'room-alert', 'floor-alert',
+], {
   host: '0.0.0.0',
   port: 8081,
   heartbeatIntervalMs: 15000,
@@ -404,14 +408,19 @@ await engine.addReaction('sse', 'building-comfort-sse', ['building-comfort-ui', 
       updated: { path: '/rooms', template: '{"op":"update","row":{ ... {{json after.Temperature}} ... }}' },
       deleted: { path: '/rooms', template: '{"op":"delete","row":{"id":{{json before.RoomId}}}}' },
     },
-    'room-alert': { /* added/updated/deleted → /room-alerts */ },
+    'floor-comfort-level-calc': { /* added/updated/deleted → /floor-comfort */ },
+    'room-alert':               { /* added/updated/deleted → /room-alerts */ },
+    // ...one entry per streamed query
   },
 });
 ```
 
 `{{json ...}}` is one of the reaction's Handlebars helpers; it serializes each value as valid
 JSON. The templates and the query-to-path mapping live in one place, `src/streams.mjs`, which
-generates both the reaction config above and a matching reshaper for the initial snapshot.
+generates both the reaction config above and a matching reshaper for the initial snapshot. The
+aggregate queries (`floor-comfort-level-calc`, `building-comfort-level-calc`, `floor-alert`)
+stream exactly the same way — the reaction renders their `avg()` changes through the `updated`
+template, keyed by floor or building id.
 
 Because SSE only carries **changes from the moment a client connects**, the app also serves
 the current state once at `GET /api/state` (built from `getQueryResults`, shaped through the
@@ -421,23 +430,12 @@ Finally, the SSE reaction listens on its own port (`8081`), so the app **reverse
 same-origin under `/sse/<path>` (`src/index.mjs`). That way the browser talks to a single
 origin and only one port needs forwarding in Codespaces or a dev container.
 
-{{% alert title="Aggregates: streamed vs. derived" color="info" %}}
-The app streams the two clean, per-entity queries — `building-comfort-ui` (one row per room)
-and `room-alert` (one row per alerting room). The **rollups** the UI also shows — each floor's
-comfort, the building's overall comfort, and which floors are alerting — are *derived in the
-browser* from the room feed, and they match Drasi's `floor-comfort-level-calc`,
-`building-comfort-level-calc`, and `floor-alert` aggregate queries exactly. Those aggregate
-queries stay defined in `queries.mjs` to demonstrate aggregation, but an aggregating query's
-`getQueryResults` returns the intermediate values it passed through, so it isn't a clean seed
-for the initial snapshot — deriving the rollups from the room feed is simpler and always
-correct.
-{{% /alert %}}
-
 ### The Web UI
 
 The front end (`public/`) is a single HTML page with vanilla CSS and JavaScript — no build
 step. On load it seeds itself from `/api/state`, then opens one `EventSource` per stream
-(`/sse/rooms`, `/sse/room-alerts`) and merges each `{ op, row }` change into a keyed map:
+(`/sse/rooms`, `/sse/floor-comfort`, `/sse/building`, `/sse/room-alerts`, `/sse/floor-alerts`)
+and merges each `{ op, row }` change into a keyed map:
 
 ```js
 const source = new EventSource('/sse/rooms');
@@ -449,8 +447,8 @@ source.onmessage = (e) => {
 };
 ```
 
-It renders the building grid, gauge, and alert lists from those maps (computing the floor and
-building rollups on the fly), and its controls (**Break** / **Reset** / **Set**,
+It renders the building grid from the room feed and the gauge, floor-comfort labels, and alert
+lists straight from their streams, and its controls (**Break** / **Reset** / **Set**,
 **Reset all rooms**, **Simulate**) call the app's small control endpoints
 (`POST /api/rooms/:id`, `POST /api/reset`, `POST /api/simulate`). Those endpoints write to
 PostgreSQL — so a click becomes a database change that Drasi observes through CDC, re-runs the
