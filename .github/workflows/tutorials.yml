@@ -121,3 +121,59 @@ jobs:
             assert.equal(shaped.waitingSince, '2025-01-01T00:00:00Z');
             console.log('✅ SSE stream contract ok');
           "
+
+  getting-started:
+    name: Getting Started — smoke test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tutorials/getting-started
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: npm install
+      - name: Syntax-check all modules
+        run: node --check src/index.mjs && for f in src/*.mjs queries.mjs; do node --check "$f"; done
+      - name: Continuous-query topology is consistent
+        run: |
+          node --input-type=module -e "
+            import assert from 'node:assert';
+            import { QUERIES, QUERY_IDS, SOURCE_MESSAGES, SOURCE_LOCATIONS } from './queries.mjs';
+
+            // Five queries with the expected ids.
+            assert.deepEqual(QUERY_IDS, [
+              'all-messages', 'hello-world-senders', 'message-counts',
+              'inactive-senders', 'messages-with-location',
+            ]);
+            for (const q of QUERIES) {
+              assert.ok(q.id && q.query && Array.isArray(q.sources) && Array.isArray(q.joins), q.id + ' well-formed');
+              assert.ok(q.sources.includes(SOURCE_MESSAGES), q.id + ' reads the messages source');
+            }
+
+            // Only the join query uses the second source + the FROM_USER join.
+            const join = QUERIES.find((q) => q.id === 'messages-with-location');
+            assert.deepEqual(join.sources, [SOURCE_MESSAGES, SOURCE_LOCATIONS]);
+            assert.equal(join.joins.length, 1);
+            assert.equal(join.joins[0].id, 'FROM_USER');
+            assert.ok(join.query.includes('FROM_USER'), 'join query traverses FROM_USER');
+
+            // The time-based query uses drasi.trueLater; the aggregation uses count().
+            assert.ok(QUERIES.find((q) => q.id === 'inactive-senders').query.includes('drasi.trueLater'));
+            assert.ok(/count\(/.test(QUERIES.find((q) => q.id === 'message-counts').query));
+            console.log('✅ continuous-query topology ok');
+          "
+      - name: locations.jsonl bootstrap file is valid
+        run: |
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            import assert from 'node:assert';
+            const lines = readFileSync('locations.jsonl', 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+            assert.equal(lines[0].kind, 'Header', 'first record is a Header');
+            const nodes = lines.filter((l) => l.kind === 'Node');
+            assert.ok(nodes.length >= 1, 'has UserLocation nodes');
+            assert.ok(nodes.every((n) => n.labels.includes('UserLocation') && n.properties.name), 'nodes are labelled UserLocation with a name');
+            console.log('✅ locations.jsonl ok (' + nodes.length + ' nodes)');
+          "
