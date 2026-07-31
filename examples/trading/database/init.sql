@@ -68,11 +68,10 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO drasi_user;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO drasi_user;
 
 -- Logical-replication publication the Drasi postgres source subscribes to.
--- NOTE: we intentionally do NOT pre-create the replication slot here. The Drasi
--- source creates it automatically on first connect (at the current WAL position,
--- i.e. *after* the seed rows below). Pre-creating the slot before seeding would
--- make CDC replay the seed INSERTs on top of the bootstrap snapshot, double-
--- counting every row.
+-- NOTE: we don't pre-create the replication slot here because it isn't needed --
+-- the Drasi source creates and manages its own slot on first connect. The source
+-- gates CDC streaming on a bootstrap snapshot boundary, so rows are delivered
+-- exactly once whether or not a slot is pre-created.
 CREATE PUBLICATION drasi_trading_pub FOR TABLE stocks, portfolio, watchlist;
 
 -- Sample stock universe (matches data/initial-prices.jsonl symbols).
