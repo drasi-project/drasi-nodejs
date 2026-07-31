@@ -63,15 +63,20 @@ async function main() {
   // --- SSE proxy -----------------------------------------------------------
   // The SSE reaction listens on its own port; we reverse-proxy each of its
   // routes under /sse/<path> so the browser talks to a single origin (and only
-  // one port needs forwarding in Codespaces / dev containers).
+  // one port needs forwarding in Codespaces / dev containers). We use 127.0.0.1
+  // (not "localhost") so the upstream fetch always hits the reaction's IPv4
+  // listener, and we defend against the browser disconnecting mid-stream so a
+  // dropped client can never take the server down.
   app.get('/sse/:path', async (req, res) => {
     const { path } = req.params;
     if (!SSE_PATHS.has(path)) return res.status(404).end();
 
     const controller = new AbortController();
-    req.on('close', () => controller.abort());
+    const abort = () => controller.abort();
+    req.on('close', abort);
+    res.on('error', abort);
     try {
-      const upstream = await fetch(`http://localhost:${SSE_PORT}/${path}`, {
+      const upstream = await fetch(`http://127.0.0.1:${SSE_PORT}/${path}`, {
         headers: { Accept: 'text/event-stream' },
         signal: controller.signal,
       });
@@ -81,19 +86,29 @@ async function main() {
         Connection: 'keep-alive',
         'X-Accel-Buffering': 'no',
       });
+      // Flush headers immediately so the browser's EventSource opens right away
+      // (and buffering proxies release the response) even before the first event.
+      res.write(': connected\n\n');
+
       const reader = upstream.body.getReader();
       const decoder = new TextDecoder();
       for (;;) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done || res.writableEnded || res.destroyed) break;
         res.write(decoder.decode(value, { stream: true }));
       }
     } catch (err) {
       if (err.name !== 'AbortError') console.error('[sse-proxy]', err.message);
     } finally {
-      res.end();
+      abort();
+      if (!res.writableEnded) res.end();
     }
   });
+
+  // A dropped SSE client (or a transient reaction hiccup) must never crash the
+  // whole app. Log and keep serving.
+  process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', err));
+  process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));
 
   // --- Control API: the UI writes to Postgres via these -------------------
   app.get('/api/rooms', async (_req, res) => {
