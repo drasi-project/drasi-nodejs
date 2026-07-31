@@ -452,7 +452,31 @@ source.onmessage = (e) => {
 
 It renders the four panels straight from those streams — **Orders** and **Vehicles** are each
 the union of their two filtered queries, and **Matched** / **Delayed** come from the join and
-temporal queries. The order and vehicle toggle buttons post to the app's small control
+temporal queries. Each row is produced by a small template literal that maps the shaped fields
+onto markup. The order row is representative — it carries the toggle button, tagged with the
+`data-order` attribute the click handler reads to know what to update:
+
+```js
+function orderRow(o) {
+  const ready = o.status === "ready";
+  const next = ready ? "Mark preparing" : "Mark ready";
+  return `<li class="row">
+    <div class="row__main">
+      <div class="row__title">Order ${escapeHtml(o.orderId)} · ${escapeHtml(o.customerName)}</div>
+      <div class="row__sub">driver ${escapeHtml(o.driverName)} · <span class="plate">${escapeHtml(o.plate)}</span></div>
+    </div>
+    <div class="row__right">
+      <span class="badge badge--${escapeAttr(o.status)}">${escapeHtml(o.status)}</span>
+      <button class="btn btn--go" data-order="${escapeAttr(o.id)}">${next}</button>
+    </div>
+  </li>`;
+}
+```
+
+The vehicle row follows the same shape (its button carries `data-vehicle`), while the
+**Matched** and **Delayed** rows are read-only variants with no button — the delayed row, for
+example, just shows the order and how long the driver has been waiting. The order and vehicle
+toggle buttons post to the app's small control
 endpoints (`POST /api/orders/:id/toggle`, `POST /api/vehicles/:plate/toggle`, `POST /api/reset`)
 in `src/db.mjs`, which run plain `UPDATE` statements against PostgreSQL and MySQL and record
 each one in the SQL log the page shows. So a click becomes a database change that Drasi observes
