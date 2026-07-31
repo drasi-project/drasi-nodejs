@@ -122,10 +122,11 @@ SELECT * FROM (VALUES
 WHERE NOT EXISTS (SELECT 1 FROM "Room");
 
 -- NOTE: unlike the drasi-server tutorial, we do NOT pre-create the logical
--- replication slot here. The @drasi/lib Postgres source creates its own slot on
--- first connect (after the seed above), and the Postgres bootstrap provider
--- loads the existing rows. Pre-creating the slot before seeding would make CDC
--- replay the seed rows on top of the bootstrap snapshot and double-count them.
+-- replication slot here. It isn't necessary: the @drasi/lib Postgres source
+-- creates and manages its own slot on first connect, and the Postgres bootstrap
+-- provider loads the existing rows. The source gates CDC streaming on a bootstrap
+-- snapshot boundary, so rows are delivered exactly once whether or not a slot is
+-- pre-created here.
 
 -- Summary.
 SET client_min_messages = NOTICE;

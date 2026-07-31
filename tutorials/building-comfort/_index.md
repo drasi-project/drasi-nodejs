@@ -281,12 +281,13 @@ that, every `UPDATE` flows to Drasi as a change. The table names are quoted and 
 in the database so the node labels Drasi sees match the queries exactly: `(r:Room)`,
 `(f:Floor)`, `(b:Building)`.
 
-{{% alert title="Why the app creates the replication slot, not init.sql" color="info" %}}
-Unlike the Drasi Server tutorial, `database/init.sql` does **not** pre-create the
-replication slot. The `@drasi/lib` Postgres source creates its own slot on first connect
-— *after* the seed rows exist — and the bootstrap provider loads those rows. Pre-creating
-the slot before seeding would make CDC replay the seed rows on top of the bootstrap
-snapshot and double-count them.
+{{% alert title="The app doesn't pre-create the replication slot" color="info" %}}
+Unlike the Drasi Server tutorial, `database/init.sql` doesn't pre-create the logical
+replication slot — you don't need to. The `@drasi/lib` Postgres source creates and manages
+its own slot the first time it connects, and the bootstrap provider loads the rows that
+already exist. The source gates CDC streaming on a **bootstrap snapshot boundary**, so each
+row is delivered exactly once even though the slot and the snapshot are established
+independently — pre-creating the slot yourself is simply unnecessary.
 {{% /alert %}}
 
 ### The Continuous Queries
