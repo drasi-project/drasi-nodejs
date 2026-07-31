@@ -2,9 +2,9 @@
 //
 // A single Node process that:
 //   1. embeds the Drasi engine (@drasi/lib) and builds the Postgres CDC source,
-//      the six continuous queries, and the SSE reaction;
-//   2. serves a static web UI plus a Server-Sent Events stream of the shaped
-//      query snapshot; and
+//      the six continuous queries, and the SSE reaction (kind: sse);
+//   2. serves a static web UI, an initial-state snapshot, and a same-origin
+//      proxy in front of the SSE reaction's Server-Sent Events streams; and
 //   3. exposes small control endpoints the UI uses to change room readings
 //      (which it does by writing to PostgreSQL, so Drasi reacts through CDC).
 
@@ -14,8 +14,8 @@ import express from 'express';
 
 import { createEngine } from './engine.mjs';
 import { ensurePlugins } from './plugins.mjs';
-import { createSseHub } from './reaction.mjs';
 import { createSimulator } from './simulate.mjs';
+import { STREAMS, SSE_PORT, reshapeRow } from './streams.mjs';
 import {
   listRooms,
   setRoom,
@@ -31,28 +31,68 @@ const PUBLIC_DIR = join(__dirname, '..', 'public');
 const PORT = Number(process.env.WEB_PORT || 3000);
 const HOST = process.env.WEB_HOST || '0.0.0.0';
 
+// SSE route paths the browser is allowed to subscribe to (from the contract).
+const SSE_PATHS = new Set(STREAMS.map((s) => s.path));
+
 async function main() {
   console.log('Starting Building Comfort…');
-  console.log('  • creating engine and downloading plugins (first run may take ~30s)…');
+  console.log('  • creating engine, downloading plugins, wiring the SSE reaction (first run ~30s)…');
   const engine = await createEngine(ensurePlugins);
-
-  console.log('  • wiring the SSE reaction (Handlebars → JSON)…');
-  const hub = await createSseHub(engine);
 
   const simulator = createSimulator();
   const app = express();
   app.use(express.json());
 
-  // --- SSE stream of the shaped snapshot -----------------------------------
-  app.get('/events', (req, res) => {
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    });
-    res.write('retry: 3000\n\n');
-    hub.addClient(res);
+  // --- Initial state -------------------------------------------------------
+  // The SSE reaction only streams changes from the moment a client connects, so
+  // the browser seeds itself from this snapshot (shaped to the same contract as
+  // the streamed changes) and then applies live deltas on top.
+  app.get('/api/state', async (_req, res) => {
+    try {
+      const state = {};
+      for (const s of STREAMS) {
+        const rows = await engine.getQueryResults(s.query);
+        state[s.path] = rows.map((r) => reshapeRow(s.fields, r));
+      }
+      res.json(state);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- SSE proxy -----------------------------------------------------------
+  // The SSE reaction listens on its own port; we reverse-proxy each of its
+  // routes under /sse/<path> so the browser talks to a single origin (and only
+  // one port needs forwarding in Codespaces / dev containers).
+  app.get('/sse/:path', async (req, res) => {
+    const { path } = req.params;
+    if (!SSE_PATHS.has(path)) return res.status(404).end();
+
+    const controller = new AbortController();
+    req.on('close', () => controller.abort());
+    try {
+      const upstream = await fetch(`http://localhost:${SSE_PORT}/${path}`, {
+        headers: { Accept: 'text/event-stream' },
+        signal: controller.signal,
+      });
+      res.writeHead(upstream.status, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+      const reader = upstream.body.getReader();
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        res.write(decoder.decode(value, { stream: true }));
+      }
+    } catch (err) {
+      if (err.name !== 'AbortError') console.error('[sse-proxy]', err.message);
+    } finally {
+      res.end();
+    }
   });
 
   // --- Control API: the UI writes to Postgres via these -------------------
@@ -67,7 +107,6 @@ async function main() {
   app.post('/api/rooms/:id', async (req, res) => {
     try {
       const room = await setRoom(req.params.id, req.body || {});
-      hub.refresh();
       res.json({ room });
     } catch (err) {
       res.status(400).json({ error: err.message });
@@ -77,7 +116,6 @@ async function main() {
   app.post('/api/rooms/:id/reset', async (req, res) => {
     try {
       const room = await resetRoom(req.params.id);
-      hub.refresh();
       res.json({ room });
     } catch (err) {
       res.status(400).json({ error: err.message });
@@ -87,7 +125,6 @@ async function main() {
   app.post('/api/reset', async (_req, res) => {
     try {
       const count = await resetAll();
-      hub.refresh();
       res.json({ reset: count });
     } catch (err) {
       res.status(500).json({ error: err.message });

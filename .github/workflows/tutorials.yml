@@ -45,21 +45,32 @@ jobs:
         run: npm install
       - name: Syntax-check all modules
         run: node --check src/index.mjs && for f in src/*.mjs queries.mjs; do node --check "$f"; done
-      - name: Handlebars snapshot shaping produces valid JSON
+      - name: SSE stream contract is consistent
         run: |
           node --input-type=module -e "
             import assert from 'node:assert';
-            import { renderSnapshot } from './src/templates.mjs';
-            const ui = [
-              { RoomId:'room_01_01_01', RoomName:'Room 01', FloorId:'floor_01_01', FloorName:'Floor 01', BuildingName:'B', Temperature:70, Humidity:40, CO2:10, ComfortLevel:46 },
-              { RoomId:'room_01_01_02', RoomName:'Room 02', FloorId:'floor_01_01', FloorName:'Floor 01', BuildingName:'B', Temperature:82, Humidity:40, CO2:10, ComfortLevel:58 },
-            ];
-            const snap = renderSnapshot({ ui, floorComfort:[{FloorId:'floor_01_01',ComfortLevel:52}], roomAlerts:[], floorAlerts:[] });
-            assert.equal(snap.floors.length, 1);
-            assert.equal(snap.floors[0].rooms[1].status, 'hot');
-            assert.equal(snap.overallComfort, 52);
-            // Empty input must still produce valid JSON.
-            const empty = renderSnapshot({ ui:[], floorComfort:[], roomAlerts:[], floorAlerts:[] });
-            assert.equal(empty.floors.length, 0);
-            console.log('✅ snapshot shaping ok');
+            import { STREAMS, buildSseRoutes, reshapeRow } from './src/streams.mjs';
+
+            // Every stream generates added/updated/deleted Handlebars routes,
+            // and the reshaper mirrors the templates' field contract.
+            const routes = buildSseRoutes();
+            for (const s of STREAMS) {
+              const r = routes[s.query];
+              assert.ok(r && r.added && r.updated && r.deleted, s.query + ' has all change routes');
+              assert.equal(r.added.path, '/' + s.path);
+              assert.ok(r.added.template.includes('\"op\":\"add\"'));
+              assert.ok(r.deleted.template.includes('before.'), 'delete reads before');
+              // Templates reference each contract column via the json helper.
+              for (const col of Object.values(s.fields)) {
+                assert.ok(r.added.template.includes('after.' + col), 'template shapes ' + col);
+              }
+            }
+
+            // reshapeRow maps raw PascalCase columns to the output contract.
+            const rooms = STREAMS.find((s) => s.path === 'rooms');
+            const shaped = reshapeRow(rooms.fields, { RoomId: 'r1', RoomName: 'Room 01', ComfortLevel: 46 });
+            assert.equal(shaped.id, 'r1');
+            assert.equal(shaped.name, 'Room 01');
+            assert.equal(shaped.comfort, 46);
+            console.log('✅ SSE stream contract ok');
           "

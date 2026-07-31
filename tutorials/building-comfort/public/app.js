@@ -1,8 +1,14 @@
 // Building Comfort — front-end logic (vanilla JS, no framework).
 //
-// 1. Subscribe to the SSE stream at /events and render each shaped snapshot.
-// 2. Drive changes through the app's control endpoints (which write to Postgres,
-//    so Drasi reacts through CDC — the app never mutates the UI directly).
+// Data flow:
+//   1. Seed current state from GET /api/state (the SSE reaction only streams
+//      changes, so we need an initial snapshot).
+//   2. Open one EventSource per stream (proxied same-origin at /sse/<path>).
+//      Each message is a Handlebars-shaped change: { op, row }.
+//   3. Merge add/update/delete into per-stream maps and render.
+//
+// The app never mutates the UI directly: the control buttons write to Postgres,
+// Drasi reacts through CDC, and the SSE reaction pushes the shaped change here.
 
 const el = (sel) => document.querySelector(sel);
 
@@ -12,23 +18,27 @@ const dom = {
   overall: el("#overall-comfort"),
   gauge: el("#gauge"),
   building: el("#building"),
-  buildingEmpty: el("#building-empty"),
   roomAlerts: el("#room-alerts"),
   floorAlerts: el("#floor-alerts"),
   resetAll: el("#reset-all"),
   simToggle: el("#sim-toggle"),
 };
 
-// Keyed room-card registry so we update in place instead of rebuilding the DOM
-// on every snapshot (which would fight the user's typing).
+// One live map per SSE stream, keyed by row id.
+const STREAMS = ["rooms", "room-alerts"];
+const state = Object.fromEntries(STREAMS.map((s) => [s, new Map()]));
+
 const cards = new Map(); // roomId -> { root, refs }
 let renderedRoomKey = "";
+let renderScheduled = false;
 
-const STATUS_LABEL = { ok: "🟢 comfortable", hot: "🔴 too hot", cold: "🔵 too cold", unknown: "…" };
-
-function classFor(status) {
-  return status === "hot" || status === "cold" ? status : "ok";
+const STATUS_LABEL = { ok: "🟢 comfortable", hot: "🔴 too hot", cold: "🔵 too cold" };
+function statusOf(comfort) {
+  const n = Number(comfort);
+  if (!Number.isFinite(n)) return "ok";
+  return n > 50 ? "hot" : n < 40 ? "cold" : "ok";
 }
+const round = (n) => (n == null || !Number.isFinite(Number(n)) ? null : Math.round(Number(n)));
 
 // ---------- API helpers ----------
 async function post(url, body) {
@@ -44,15 +54,44 @@ async function post(url, body) {
   return res.json();
 }
 
-// ---------- Rendering ----------
-function roomKey(snapshot) {
-  return snapshot.floors.flatMap((f) => f.rooms.map((r) => r.roomId)).join("|");
+// ---------- Derive the building shape + rollups from the room feed ----------
+// These correspond to Drasi's aggregate queries (floor / building comfort and
+// floor alerts); we compute them here from the clean room feed.
+function floorsFromRooms() {
+  const rooms = [...state.rooms.values()].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  const floors = new Map();
+  for (const r of rooms) {
+    if (!floors.has(r.floorId)) floors.set(r.floorId, { floorId: r.floorId, floorName: r.floor, rooms: [] });
+    floors.get(r.floorId).rooms.push(r);
+  }
+  const list = [...floors.values()].sort((a, b) => String(a.floorId).localeCompare(String(b.floorId)));
+  for (const f of list) f.comfort = avg(f.rooms.map((r) => Number(r.comfort)));
+  return list;
 }
 
-function buildSkeleton(snapshot) {
+function avg(nums) {
+  const xs = nums.filter((n) => Number.isFinite(n));
+  return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+}
+
+function overallComfort() {
+  return round(avg([...state.rooms.values()].map((r) => Number(r.comfort))));
+}
+
+// ---------- Rendering ----------
+function scheduleRender() {
+  if (renderScheduled) return;
+  renderScheduled = true;
+  requestAnimationFrame(() => {
+    renderScheduled = false;
+    render();
+  });
+}
+
+function buildSkeleton(floors) {
   cards.clear();
   dom.building.innerHTML = "";
-  for (const floor of snapshot.floors) {
+  for (const floor of floors) {
     const section = document.createElement("section");
     section.className = "floor";
     section.innerHTML = `
@@ -62,9 +101,7 @@ function buildSkeleton(snapshot) {
       </div>
       <div class="rooms"></div>`;
     const roomsWrap = section.querySelector(".rooms");
-    for (const room of floor.rooms) {
-      roomsWrap.appendChild(buildCard(room));
-    }
+    for (const room of floor.rooms) roomsWrap.appendChild(buildCard(room));
     dom.building.appendChild(section);
   }
 }
@@ -72,7 +109,7 @@ function buildSkeleton(snapshot) {
 function buildCard(room) {
   const root = document.createElement("div");
   root.className = "room";
-  root.dataset.room = room.roomId;
+  root.dataset.room = room.id;
   root.innerHTML = `
     <div class="room__top">
       <span class="room__name"></span>
@@ -103,24 +140,23 @@ function buildCard(room) {
     inHum: root.querySelector(".in-hum"),
     inCo2: root.querySelector(".in-co2"),
   };
-  cards.set(room.roomId, { root, refs });
+  cards.set(room.id, { root, refs });
   return root;
 }
 
 function updateCard(room) {
-  const entry = cards.get(room.roomId);
+  const entry = cards.get(room.id);
   if (!entry) return;
   const { root, refs } = entry;
-  const cls = classFor(room.status);
+  const cls = statusOf(room.comfort);
   root.className = `room room--${cls}`;
-  refs.name.textContent = room.roomName;
-  refs.badge.textContent = STATUS_LABEL[room.status] || STATUS_LABEL.unknown;
+  refs.name.textContent = room.name;
+  refs.badge.textContent = STATUS_LABEL[cls];
   refs.badge.className = `room__badge badge--${cls}`;
-  refs.comfort.textContent = room.comfortLevel ?? "–";
+  refs.comfort.textContent = round(room.comfort) ?? "–";
   refs.temp.textContent = room.temperature ?? "–";
   refs.hum.textContent = room.humidity ?? "–";
   refs.co2.textContent = room.co2 ?? "–";
-  // Refresh the input defaults, but never yank a value the user is editing.
   setUnlessFocused(refs.inTemp, room.temperature);
   setUnlessFocused(refs.inHum, room.humidity);
   setUnlessFocused(refs.inCo2, room.co2);
@@ -130,44 +166,46 @@ function setUnlessFocused(input, value) {
   if (document.activeElement !== input) input.value = value ?? "";
 }
 
-function render(snapshot) {
-  dom.buildingName.textContent = snapshot.buildingName || "Building Comfort";
+function render() {
+  const rooms = [...state.rooms.values()];
+  dom.buildingName.textContent = rooms[0]?.buildingName || "Building Comfort";
 
-  // Overall comfort gauge.
-  const overall = snapshot.overallComfort;
+  const overall = overallComfort();
   dom.overall.textContent = overall == null ? "–" : overall;
   const gcls = overall == null ? "" : overall > 50 ? "hot" : overall < 40 ? "cold" : "ok";
   dom.gauge.className = `gauge${gcls ? ` gauge--${gcls}` : ""}`;
 
-  // Rebuild the grid only when the set of rooms changes.
-  const key = roomKey(snapshot);
+  const floors = floorsFromRooms();
+  const key = floors.flatMap((f) => f.rooms.map((r) => r.id)).join("|");
   if (key !== renderedRoomKey) {
     renderedRoomKey = key;
-    if (snapshot.floors.length === 0) {
+    if (floors.length === 0) {
       dom.building.innerHTML = '<p class="empty">Waiting for data…</p>';
       cards.clear();
     } else {
-      buildSkeleton(snapshot);
+      buildSkeleton(floors);
     }
   }
+  for (const floor of floors) for (const room of floor.rooms) updateCard(room);
 
-  // Update room cards in place.
-  for (const floor of snapshot.floors) {
-    for (const room of floor.rooms) updateCard(room);
-  }
-
-  // Per-floor comfort next to each floor heading.
-  const floorComfort = new Map(snapshot.floorComfort.map((f) => [f.floorId, f.comfortLevel]));
+  // Per-floor comfort labels (computed from the floor's rooms).
+  const floorComfort = new Map(floors.map((f) => [f.floorId, f.comfort]));
   document.querySelectorAll(".floor__comfort").forEach((node) => {
-    const val = floorComfort.get(node.dataset.floor);
-    node.innerHTML = `comfort <b>${val ?? "–"}</b>`;
+    const c = floorComfort.get(node.dataset.floor);
+    node.innerHTML = `comfort <b>${c == null ? "–" : round(c)}</b>`;
   });
 
-  renderAlerts(dom.roomAlerts, snapshot.roomAlerts, "All rooms are comfortable.", (a) =>
-    `⚠️ <strong>${escapeHtml(a.roomName)}</strong> <code>${escapeHtml(a.roomId)}</code> — comfort <b>${a.comfortLevel}</b>`,
+  // Floor alerts: floors whose average comfort is outside the 40–50 band
+  // (this is exactly what Drasi's floor-alert aggregate query computes).
+  const floorAlerts = floors
+    .filter((f) => f.comfort != null && (f.comfort < 40 || f.comfort > 50))
+    .map((f) => ({ id: f.floorId, name: f.floorName, comfort: f.comfort }));
+
+  renderAlerts(dom.roomAlerts, [...state["room-alerts"].values()], "All rooms are comfortable.", (a) =>
+    `⚠️ <strong>${escapeHtml(a.name)}</strong> <code>${escapeHtml(a.id)}</code> — comfort <b>${round(a.comfort)}</b>`,
   );
-  renderAlerts(dom.floorAlerts, snapshot.floorAlerts, "All floors are comfortable.", (a) =>
-    `⚠️ <strong>${escapeHtml(a.floorName)}</strong> — comfort <b>${a.comfortLevel}</b>`,
+  renderAlerts(dom.floorAlerts, floorAlerts, "All floors are comfortable.", (a) =>
+    `⚠️ <strong>${escapeHtml(a.name)}</strong> — comfort <b>${round(a.comfort)}</b>`,
   );
 }
 
@@ -176,7 +214,52 @@ function renderAlerts(container, items, okText, fmt) {
     container.innerHTML = `<li class="alert-list__ok">✅ ${okText}</li>`;
     return;
   }
+  items.sort((a, b) => String(a.id).localeCompare(String(b.id)));
   container.innerHTML = items.map((a) => `<li class="warn">${fmt(a)}</li>`).join("");
+}
+
+// ---------- Live data: seed + stream ----------
+function applyChange(path, msg) {
+  const map = state[path];
+  if (!map || !msg || !msg.row || msg.row.id == null) return;
+  if (msg.op === "delete") map.delete(msg.row.id);
+  else map.set(msg.row.id, msg.row);
+  scheduleRender();
+}
+
+async function seedState() {
+  const data = await fetch("/api/state").then((r) => r.json());
+  for (const path of STREAMS) {
+    state[path].clear();
+    for (const row of data[path] || []) state[path].set(row.id, row);
+  }
+  scheduleRender();
+}
+
+function connectStreams() {
+  let anyOpen = false;
+  for (const path of STREAMS) {
+    const source = new EventSource(`/sse/${path}`);
+    source.onmessage = (e) => {
+      try {
+        applyChange(path, JSON.parse(e.data));
+      } catch (err) {
+        console.error("bad SSE message on", path, err);
+      }
+    };
+    source.onopen = () => {
+      anyOpen = true;
+      dom.status.textContent = "live";
+      dom.status.className = "status status--on";
+    };
+    source.onerror = () => {
+      if (!anyOpen) {
+        dom.status.textContent = "reconnecting…";
+        dom.status.className = "status status--off";
+      }
+      // EventSource reconnects automatically.
+    };
+  }
 }
 
 // ---------- Event handling ----------
@@ -227,27 +310,6 @@ dom.simToggle.addEventListener("change", async () => {
   }
 });
 
-// ---------- SSE connection ----------
-function connect() {
-  const source = new EventSource("/events");
-  source.addEventListener("snapshot", (e) => {
-    try {
-      render(JSON.parse(e.data));
-    } catch (err) {
-      console.error("bad snapshot", err);
-    }
-  });
-  source.onopen = () => {
-    dom.status.textContent = "live";
-    dom.status.className = "status status--on";
-  };
-  source.onerror = () => {
-    dom.status.textContent = "reconnecting…";
-    dom.status.className = "status status--off";
-    // EventSource reconnects automatically.
-  };
-}
-
 // Reflect current simulation state on load.
 fetch("/api/simulate")
   .then((r) => r.json())
@@ -256,7 +318,10 @@ fetch("/api/simulate")
   })
   .catch(() => {});
 
-connect();
+// Seed, then stream.
+seedState()
+  .catch((err) => console.error("initial state failed", err))
+  .finally(connectStreams);
 
 // ---------- small escaping helpers ----------
 function escapeHtml(s) {

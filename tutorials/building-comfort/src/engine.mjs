@@ -1,13 +1,14 @@
 // EngineHost: owns the single embedded @drasi/lib instance and wires up the
 // Building Comfort topology:
 //   real Postgres CDC source (+ bootstrap)  ->  synthetic joins  ->  6 queries
-// Query result changes are shaped into SSE payloads by ./reaction.mjs.
+//   ->  SSE reaction (shapes changes with Handlebars, streams them over SSE)
 
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createConnection } from 'node:net';
 import { QUERIES, SOURCE_ID } from '../queries.mjs';
+import { buildSseRoutes, SSE_PORT } from './streams.mjs';
 
 // Resolve @drasi/lib whether the tutorial runs against the published package
 // (npm install) or the local repo checkout (npm link / workspace).
@@ -90,6 +91,20 @@ export async function createEngine(ensurePlugins) {
   for (const q of QUERIES) {
     await engine.addQuery(q.id, q.query, q.sources, 'cypher', q.joins);
   }
+
+  // The SSE reaction (kind: sse) streams each query's result changes to the
+  // browser over Server-Sent Events. Its `routes` carry Handlebars templates
+  // (built in ./streams.mjs) that SHAPE each changed row into our JSON contract
+  // before it is sent — no bespoke reaction code required. The reaction listens
+  // on its own port; the app proxies it same-origin (see src/index.mjs).
+  const routes = buildSseRoutes();
+  await engine.addReaction('sse', 'building-comfort-sse', Object.keys(routes), {
+    host: '0.0.0.0',
+    port: SSE_PORT,
+    ssePath: '/events',
+    heartbeatIntervalMs: 15000,
+    routes,
+  });
 
   return engine;
 }

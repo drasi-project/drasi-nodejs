@@ -15,11 +15,11 @@ six continuous queries, and streams the results to a live web UI over
 You'll change room readings and watch everything react in real time.
 
 Unlike the [Drasi Server tutorial](https://github.com/drasi-project/learning-drasi-server)
-this is based on, there is no separate server to run and no built-in dashboard reaction.
-Instead, the app defines its own **SSE reaction in JavaScript**: it uses **Handlebars**
-templates to shape the raw query rows into a display-ready JSON snapshot, then pushes
-that snapshot to the browser. The web UI adds controls the dashboard reaction doesn't
-have — **toggle a simulator**, and **reset or set any room** — all from the page.
+this is based on, there is no separate server to run and no built-in *dashboard* reaction.
+Instead, the app embeds the engine and adds Drasi's **SSE reaction** (`kind: sse`): it shapes
+each query change with **Handlebars** templates and streams it to the browser over Server-Sent
+Events, driving a custom web UI. That UI adds controls the dashboard reaction doesn't have —
+**toggle a simulator**, and **reset or set any room** — all from the page.
 
 **What you'll build:** a running Node app that embeds Drasi, connects to PostgreSQL, and
 reacts to room sensor changes in real time, assembled from Drasi's three core building
@@ -47,8 +47,8 @@ blocks:
 > - **Working directory:** run every command from the tutorial directory
 >   (`tutorials/building-comfort/`). The dev container opens there automatically; if
 >   you're running locally, `cd tutorials/building-comfort` first.
-> - **Ports:** the web UI is on `3000` and PostgreSQL is published on `5732`. There is no
->   separate engine port — Drasi runs inside the app.
+> - **Ports:** the web UI is on `3000` and PostgreSQL is published on `5732`. The SSE reaction
+>   runs inside the app on `8081`, but the app proxies it, so only `3000` needs to be reachable.
 
 ## Step 1 of 4: Set Up Your Environment
 The easiest way to follow this tutorial is the **dev container**, which installs
@@ -91,8 +91,8 @@ npm run demo
 and nine rooms — every room comfortable to begin with) and then runs the Node app in the
 foreground.
 
-On first start, the app downloads the Drasi plugins it needs (`source/postgres` and
-`bootstrap/postgres`) from `ghcr.io/drasi-project` and caches them under
+On first start, the app downloads the Drasi plugins it needs (`source/postgres`,
+`bootstrap/postgres`, and `reaction/sse`) from `ghcr.io/drasi-project` and caches them under
 `.drasi-plugins/`, connects to the database, and starts the six continuous queries and
 the SSE reaction. When you see this line, it's ready:
 
@@ -263,6 +263,11 @@ There are six queries (all defined in `queries.mjs`):
 | `floor-alert` | Only the floors whose average comfort is outside 40–50 |
 | `building-alert` | The building, when its overall comfort is outside 40–50 |
 
+The SSE reaction streams the two per-entity queries — `building-comfort-ui` and `room-alert` —
+to the UI. The four **aggregate** queries demonstrate rollups; the UI computes the same floor
+and building comfort levels (and floor alerts) in the browser from the room feed. See
+[The SSE Reaction](#the-sse-reaction-kind-sse) for why.
+
 #### Synthetic joins connect the entities
 
 PostgreSQL knows `Room.floor_id` references `Floor.id` through a foreign key, but Drasi
@@ -333,72 +338,84 @@ Because these are *continuous* queries, the aggregates are maintained **incremen
 when one room's reading changes, Drasi recomputes only the affected floor and building
 averages and emits just that change — it never rescans every room.
 
-### The SSE Reaction (Handlebars → JSON)
+### The SSE Reaction (`kind: sse`)
 
-This is where the Node version differs most from the Drasi Server tutorial. Instead of a
-built-in dashboard reaction, the app defines its own reaction in JavaScript with
-[`addJsReaction`](https://drasi-project.github.io/drasi-nodejs/docs/guides/js-reactions/)
-(`src/reaction.mjs`). One reaction subscribes to all six queries; whenever any result set
-changes, it re-reads the current snapshots and uses **Handlebars** to *shape* them into a
-single display-ready JSON payload:
+This is where the Node version differs most from the Drasi Server tutorial's *dashboard*
+reaction — but the mechanism is the **same built-in SSE reaction** the
+[Getting Started tutorial](https://github.com/drasi-project/learning-drasi-server) uses.
+The app loads the `reaction/sse` plugin from the OCI registry and adds it with
+[`addReaction`](https://drasi-project.github.io/drasi-nodejs/docs/api/) (`src/engine.mjs`).
+The reaction opens an HTTP endpoint and streams each subscribed query's result **changes**
+to the browser over [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events).
 
-```js
-await engine.addJsReaction('sse-shaper', QUERY_IDS, () => schedule());
-
-async function refresh() {
-  const [ui, floorComfort, roomAlerts, floorAlerts] = await Promise.all([
-    engine.getQueryResults('building-comfort-ui'),
-    engine.getQueryResults('floor-comfort-level-calc'),
-    engine.getQueryResults('room-alert'),
-    engine.getQueryResults('floor-alert'),
-  ]);
-  const snapshot = renderSnapshot({ ui, floorComfort, roomAlerts, floorAlerts });
-  broadcast(snapshot); // Server-Sent Events → every connected browser
-}
-```
-
-The Handlebars template (`src/templates.mjs`) does the shaping: it groups rooms by floor,
-classifies each comfort level with a `comfortStatus` helper (`hot` / `cold` / `ok`), and
-computes the overall building average — emitting valid JSON that the browser renders
-directly:
-
-```handlebars
-"floors": [
-  {{#groupBy ui "FloorName"}}
-  {
-    "floorName": {{json @key}},
-    "rooms": [
-      {{#each this}}
-      {
-        "roomId": {{json this.RoomId}},
-        "comfortLevel": {{json this.ComfortLevel}},
-        "status": {{json (comfortStatus this.ComfortLevel)}},
-        "temperature": {{json this.Temperature}}
-      }{{#unless @last}},{{/unless}}
-      {{/each}}
-    ]
-  }{{#unless @last}},{{/unless}}
-  {{/groupBy}}
-]
-```
-
-Because the queries only emit *changes*, the reaction refreshes the instant a room's
-comfort changes — no polling. The browser subscribes with a few lines of JavaScript
-(`public/app.js`):
+Crucially, the SSE reaction shapes each change with a **Handlebars template** before sending
+it — no reaction code of our own required. We give each query its own `routes` entry with
+`added` / `updated` / `deleted` templates that rename the raw query columns into the clean
+JSON contract the UI wants:
 
 ```js
-const events = new EventSource('/events');
-events.addEventListener('snapshot', (e) => render(JSON.parse(e.data)));
+await engine.addReaction('sse', 'building-comfort-sse', ['building-comfort-ui', 'room-alert'], {
+  host: '0.0.0.0',
+  port: 8081,
+  heartbeatIntervalMs: 15000,
+  routes: {
+    'building-comfort-ui': {
+      added:   { path: '/rooms', template: '{"op":"add","row":{"id":{{json after.RoomId}},"name":{{json after.RoomName}},"floor":{{json after.FloorName}},"comfort":{{json after.ComfortLevel}}, ... }}' },
+      updated: { path: '/rooms', template: '{"op":"update","row":{ ... {{json after.Temperature}} ... }}' },
+      deleted: { path: '/rooms', template: '{"op":"delete","row":{"id":{{json before.RoomId}}}}' },
+    },
+    'room-alert': { /* added/updated/deleted → /room-alerts */ },
+  },
+});
 ```
+
+`{{json ...}}` is one of the reaction's Handlebars helpers; it serializes each value as valid
+JSON. The templates and the query-to-path mapping live in one place, `src/streams.mjs`, which
+generates both the reaction config above and a matching reshaper for the initial snapshot.
+
+Because SSE only carries **changes from the moment a client connects**, the app also serves
+the current state once at `GET /api/state` (built from `getQueryResults`, shaped through the
+same contract). The browser seeds from that snapshot, then applies live deltas.
+
+Finally, the SSE reaction listens on its own port (`8081`), so the app **reverse-proxies** it
+same-origin under `/sse/<path>` (`src/index.mjs`). That way the browser talks to a single
+origin and only one port needs forwarding in Codespaces or a dev container.
+
+> **Aggregates: streamed vs. derived**
+>
+> The app streams the two clean, per-entity queries — `building-comfort-ui` (one row per room)
+> and `room-alert` (one row per alerting room). The **rollups** the UI also shows — each floor's
+> comfort, the building's overall comfort, and which floors are alerting — are *derived in the
+> browser* from the room feed, and they match Drasi's `floor-comfort-level-calc`,
+> `building-comfort-level-calc`, and `floor-alert` aggregate queries exactly. Those aggregate
+> queries stay defined in `queries.mjs` to demonstrate aggregation, but an aggregating query's
+> `getQueryResults` returns the intermediate values it passed through, so it isn't a clean seed
+> for the initial snapshot — deriving the rollups from the room feed is simpler and always
+> correct.
 
 ### The Web UI
 
 The front end (`public/`) is a single HTML page with vanilla CSS and JavaScript — no build
-step. It renders the shaped snapshot into the building grid, gauge, and alert lists, and
-its controls (**Break** / **Reset** / **Set**, **Reset all rooms**, **Simulate**) call the
-app's small control endpoints (`POST /api/rooms/:id`, `POST /api/reset`,
-`POST /api/simulate`). Those endpoints write to PostgreSQL — so a click becomes a database
-change that Drasi observes through CDC, closing the loop.
+step. On load it seeds itself from `/api/state`, then opens one `EventSource` per stream
+(`/sse/rooms`, `/sse/room-alerts`) and merges each `{ op, row }` change into a keyed map:
+
+```js
+const source = new EventSource('/sse/rooms');
+source.onmessage = (e) => {
+  const { op, row } = JSON.parse(e.data);
+  if (op === 'delete') rooms.delete(row.id);
+  else rooms.set(row.id, row);
+  render();
+};
+```
+
+It renders the building grid, gauge, and alert lists from those maps (computing the floor and
+building rollups on the fly), and its controls (**Break** / **Reset** / **Set**,
+**Reset all rooms**, **Simulate**) call the app's small control endpoints
+(`POST /api/rooms/:id`, `POST /api/reset`, `POST /api/simulate`). Those endpoints write to
+PostgreSQL — so a click becomes a database change that Drasi observes through CDC, re-runs the
+affected queries, and the SSE reaction pushes the shaped change back to the browser, closing
+the loop.
 
 ## Clean Up
 When you're finished, stop the app with **Ctrl+C**, then remove the database container:
@@ -417,12 +434,12 @@ bash scripts/cleanup.sh --volumes
 - **Continuous Queries** with **synthetic joins** let you model relationships
   (room → floor → building) and compute derived values (comfort levels) that stay current
   automatically.
-- **Reactions** turn query changes into action. A **JavaScript reaction** shaped the
-  results with **Handlebars** and streamed them over **SSE** to a custom UI — full control
-  over the markup, with no separate server.
+- **Reactions** turn query changes into action. Drasi's **SSE reaction** (`kind: sse`) shaped
+  each change with **Handlebars** templates and streamed it over **Server-Sent Events** to a
+  custom UI — full control over the markup, with no reaction code of your own.
 - Because Drasi emits only what *changed*, everything updates the instant the data does,
   with no polling.
 
 From here, try editing the comfort formula in `queries.mjs`, changing the Handlebars
-shaping in `src/templates.mjs`, adding a new alert query, or pointing the app at your own
+templates in `src/streams.mjs`, adding a new alert query, or pointing the app at your own
 data.

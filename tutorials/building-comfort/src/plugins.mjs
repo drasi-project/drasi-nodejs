@@ -8,10 +8,12 @@ import { join } from 'node:path';
 
 const REGISTRY = 'ghcr.io/drasi-project';
 
-// The Postgres CDC source + its bootstrap provider (loads existing rows).
+// The Postgres CDC source + its bootstrap provider, and the SSE reaction that
+// streams query-result changes to the browser (shaped by Handlebars templates).
 const REQUIRED = [
   { repo: 'source/postgres', type: 'source', kind: 'postgres' },
   { repo: 'bootstrap/postgres', type: 'bootstrap', kind: 'postgres' },
+  { repo: 'reaction/sse', type: 'reaction', kind: 'sse' },
 ];
 
 /** Primary + fallback OCI arch suffixes for the current platform. */
