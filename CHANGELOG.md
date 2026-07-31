@@ -9,6 +9,22 @@ release process.
 
 ## [Unreleased]
 
+### Added
+
+- **Platform-aware plugin resolution** — new `resolvePlugin(reference)` and
+  `installPlugin(reference, destDir, options?)` methods expose the same resolver
+  `drasi-server`'s auto-install uses. Given a bare reference like `"source/postgres"`
+  (the default registry `ghcr.io/drasi-project` is assumed), the resolver selects the
+  OCI tag for the build's target platform, checks the plugin's SDK/core/lib versions
+  against the versions this addon was built against, and reports a digest-pinned
+  `reference` plus the exact `filename` the cdylib must use for `loadPlugins` to
+  discover it. `installPlugin` additionally downloads the resolved artifact (with the
+  same opt-in cosign verification as `pullPlugin`) in one call, returning
+  `{ path, resolved, verification }`. This removes the platform/arch/tag/filename
+  boilerplate consumers previously had to hand-roll around the low-level
+  `listPluginTags` + `pullPlugin`, and adds the version-compatibility check those
+  lacked. New `ResolvedPlugin` and `InstallPluginResult` TypeScript types.
+
 ## [0.2.1] - 2026-07-30
 
 ### Added

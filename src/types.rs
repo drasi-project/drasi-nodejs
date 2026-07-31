@@ -318,6 +318,47 @@ pub struct TrustedIdentityOption {
     pub subject_pattern: String,
 }
 
+/// A plugin reference resolved for this host by `resolvePlugin` — the specific,
+/// version-compatible artifact to download for the current platform.
+///
+/// The resolver (the same one `drasi-server`'s auto-install uses) picks the
+/// platform tag for the build target, checks the plugin's SDK/core/lib versions
+/// against the versions this addon was built against, and reports the exact
+/// `filename` the downloaded cdylib must use for `loadPlugins` to discover it.
+/// `reference` is pinned by `digest`, so a later `installPlugin`/`pullPlugin` of
+/// it is immutable.
+#[napi(object)]
+pub struct ResolvedPlugin {
+    /// Full OCI reference pinned by digest (e.g. `ghcr.io/drasi-project/source/postgres@sha256:…`).
+    pub reference: String,
+    /// Resolved version tag (e.g. `0.1.13`).
+    pub version: String,
+    /// drasi-plugin-sdk version the plugin was built against.
+    pub sdk_version: String,
+    /// drasi-core version the plugin was built against.
+    pub core_version: String,
+    /// drasi-lib version the plugin was built against.
+    pub lib_version: String,
+    /// OCI platform string (e.g. `linux/amd64`).
+    pub platform: String,
+    /// SHA256 digest of the manifest.
+    pub digest: String,
+    /// Filename the downloaded cdylib must use (e.g. `libdrasi_source_postgres.so`).
+    pub filename: String,
+}
+
+/// The result of `installPlugin`: the downloaded artifact path, how the
+/// reference resolved, and the cosign verification outcome.
+#[napi(object)]
+pub struct InstallPluginResult {
+    /// Absolute path of the downloaded plugin file.
+    pub path: String,
+    /// How the reference resolved for this host/platform.
+    pub resolved: ResolvedPlugin,
+    /// Cosign verification outcome (see `pullPlugin`).
+    pub verification: PullPluginVerification,
+}
+
 // ---------------------------------------------------------------------------
 // Component status
 // ---------------------------------------------------------------------------
