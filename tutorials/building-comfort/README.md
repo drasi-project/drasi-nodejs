@@ -48,7 +48,8 @@ blocks:
 >   (`tutorials/building-comfort/`). The dev container opens there automatically; if
 >   you're running locally, `cd tutorials/building-comfort` first.
 > - **Ports:** the web UI is on `3000` and PostgreSQL is published on `5732`. The SSE reaction
->   runs inside the app on `8081`, but the app proxies it, so only `3000` needs to be reachable.
+>   runs inside the app on `8081`, but the app multiplexes it into the UI's `/events` stream, so
+>   only `3000` needs to be reachable.
 
 ## Step 1 of 4: Set Up Your Environment
 The easiest way to follow this tutorial is the **dev container**, which installs
@@ -386,23 +387,28 @@ Because SSE only carries **changes from the moment a client connects**, the app 
 the current state once at `GET /api/state` (built from `getQueryResults`, shaped through the
 same contract). The browser seeds from that snapshot, then applies live deltas.
 
-Finally, the SSE reaction listens on its own port (`8081`), so the app **reverse-proxies** it
-same-origin under `/sse/<path>` (`src/index.mjs`). That way the browser talks to a single
-origin and only one port needs forwarding in Codespaces or a dev container.
+Finally, the SSE reaction listens on its own port (`8081`) and serves each query on its own
+route. Rather than have the browser open one `EventSource` per route — which, with the
+browser's ~6-connections-per-host HTTP/1.1 limit, would eat into the connections the control
+`fetch()`es need — the app opens all of those routes itself and **multiplexes** them into a
+**single** same-origin stream at `GET /events` (`src/index.mjs`). Each forwarded event is
+tagged with its stream path (`{ "path": …, "msg": { op, row } }`). Node has no such per-host
+limit, and only one port needs forwarding in Codespaces or a dev container.
 
 ### The Web UI
 
 The front end (`public/`) is a single HTML page with vanilla CSS and JavaScript — no build
-step. On load it seeds itself from `/api/state`, then opens one `EventSource` per stream
-(`/sse/rooms`, `/sse/floor-comfort`, `/sse/building`, `/sse/room-alerts`, `/sse/floor-alerts`)
-and merges each `{ op, row }` change into a keyed map:
+step. On load it seeds itself from `/api/state`, then opens one `EventSource` at `/events` and
+merges each `{ op, row }` change into the map for its `path`:
 
 ```js
-const source = new EventSource('/sse/rooms');
+const source = new EventSource('/events');
 source.onmessage = (e) => {
-  const { op, row } = JSON.parse(e.data);
-  if (op === 'delete') rooms.delete(row.id);
-  else rooms.set(row.id, row);
+  const { path, msg } = JSON.parse(e.data); // path names the stream
+  const { op, row } = msg;
+  const map = state[path];
+  if (op === 'delete') map.delete(row.id);
+  else map.set(row.id, row);
   render();
 };
 ```

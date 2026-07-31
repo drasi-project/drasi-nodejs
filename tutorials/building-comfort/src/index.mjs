@@ -3,8 +3,9 @@
 // A single Node process that:
 //   1. embeds the Drasi engine (@drasi/lib) and builds the Postgres CDC source,
 //      the six continuous queries, and the SSE reaction (kind: sse);
-//   2. serves a static web UI, an initial-state snapshot, and a same-origin
-//      proxy in front of the SSE reaction's Server-Sent Events streams; and
+//   2. serves a static web UI, an initial-state snapshot, and a single
+//      same-origin "/events" stream that multiplexes the SSE reaction's routes;
+//      and
 //   3. exposes small control endpoints the UI uses to change room readings
 //      (which it does by writing to PostgreSQL, so Drasi reacts through CDC).
 
@@ -35,9 +36,6 @@ const PORT = Number(process.env.WEB_PORT || 3000);
 // IPv4-only `0.0.0.0` bind would silently fail to forward.
 const HOST = process.env.WEB_HOST || undefined;
 
-// SSE route paths the browser is allowed to subscribe to (from the contract).
-const SSE_PATHS = new Set(STREAMS.map((s) => s.path));
-
 async function main() {
   console.log('Starting Building Comfort…');
   console.log('  • creating engine, downloading plugins, wiring the SSE reaction (first run ~30s)…');
@@ -64,49 +62,76 @@ async function main() {
     }
   });
 
-  // --- SSE proxy -----------------------------------------------------------
-  // The SSE reaction listens on its own port; we reverse-proxy each of its
-  // routes under /sse/<path> so the browser talks to a single origin (and only
-  // one port needs forwarding in Codespaces / dev containers). We use 127.0.0.1
-  // (not "localhost") so the upstream fetch always hits the reaction's IPv4
-  // listener, and we defend against the browser disconnecting mid-stream so a
-  // dropped client can never take the server down.
-  app.get('/sse/:path', async (req, res) => {
-    const { path } = req.params;
-    if (!SSE_PATHS.has(path)) return res.status(404).end();
+  // --- SSE fan-in: one client stream multiplexes every reaction route ------
+  // The SSE reaction serves each query on its own route. If the browser opened
+  // one EventSource per route, those long-lived connections would eat into the
+  // browser's ~6-connections-per-host HTTP/1.1 limit and could starve the
+  // control fetch()es. Instead the app opens all upstream routes itself — Node
+  // has no such per-host limit — and merges them into a SINGLE same-origin
+  // "/events" stream, tagging each event with its path. This also means only
+  // one port needs forwarding in Codespaces / dev containers.
+  app.get('/events', async (req, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    // Flush headers immediately so the browser's EventSource opens right away.
+    res.write(': connected\n\n');
 
     const controller = new AbortController();
-    const abort = () => controller.abort();
-    req.on('close', abort);
-    res.on('error', abort);
-    try {
-      const upstream = await fetch(`http://127.0.0.1:${SSE_PORT}/${path}`, {
-        headers: { Accept: 'text/event-stream' },
-        signal: controller.signal,
-      });
-      res.writeHead(upstream.status, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      });
-      // Flush headers immediately so the browser's EventSource opens right away
-      // (and buffering proxies release the response) even before the first event.
-      res.write(': connected\n\n');
-
-      const reader = upstream.body.getReader();
-      const decoder = new TextDecoder();
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done || res.writableEnded || res.destroyed) break;
-        res.write(decoder.decode(value, { stream: true }));
-      }
-    } catch (err) {
-      if (err.name !== 'AbortError') console.error('[sse-proxy]', err.message);
-    } finally {
-      abort();
+    // A comment "ping" keeps the connection warm through idle proxy timeouts.
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded) res.write(': ping\n\n');
+    }, 15000);
+    let closed = false;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      controller.abort();
+      clearInterval(heartbeat);
       if (!res.writableEnded) res.end();
-    }
+    };
+    req.on('close', cleanup);
+    res.on('error', cleanup);
+
+    // Fan in every reaction route; forward each event tagged with its path.
+    await Promise.all(
+      STREAMS.map(async ({ path }) => {
+        try {
+          const upstream = await fetch(`http://127.0.0.1:${SSE_PORT}/${path}`, {
+            headers: { Accept: 'text/event-stream' },
+            signal: controller.signal,
+          });
+          const reader = upstream.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done || res.writableEnded) break;
+            buf = (buf + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n');
+            // Re-frame each complete SSE event, re-tagged with its stream path.
+            let sep;
+            while ((sep = buf.indexOf('\n\n')) !== -1) {
+              const frame = buf.slice(0, sep);
+              buf = buf.slice(sep + 2);
+              const data = frame
+                .split('\n')
+                .filter((l) => l.startsWith('data:'))
+                .map((l) => l.slice(5).replace(/^ /, ''))
+                .join('\n');
+              if (data && !res.writableEnded) {
+                res.write(`data: {"path":${JSON.stringify(path)},"msg":${data}}\n\n`);
+              }
+            }
+          }
+        } catch (err) {
+          if (err.name !== 'AbortError') console.error('[sse-mux]', path, err.message);
+        }
+      }),
+    );
+    cleanup();
   });
 
   // A dropped SSE client (or a transient reaction hiccup) must never crash the

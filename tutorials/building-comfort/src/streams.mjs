@@ -1,8 +1,8 @@
 // Single source of truth for what the SSE reaction streams to the browser.
 //
 // Each entry maps a continuous query to:
-//   - `path`   : the SSE route the reaction serves it on (the app proxies these
-//                same-origin under /sse/<path>);
+//   - `path`   : the SSE route the reaction serves it on (the app fans these in
+//                and multiplexes them into a single same-origin /events stream);
 //   - `key`    : the field the browser merges rows by;
 //   - `fields` : a { outputName: QueryColumn } contract.
 //

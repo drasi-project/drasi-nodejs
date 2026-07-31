@@ -17,11 +17,11 @@
         "--init",
         "--ipc=host"
     ],
-    // Only the Comfort UI (3000) needs forwarding: the app reverse-proxies the
-    // SSE reaction under /sse/*, so everything works over the single forwarded
-    // port in Codespaces and local dev containers alike. 5732 is optional (psql
-    // from the host). The app listens dual-stack so the forwarder reaches it via
-    // IPv4 or IPv6 localhost.
+    // Only the Comfort UI (3000) needs forwarding: the app multiplexes the SSE
+    // reaction's routes into a single same-origin /events stream, so everything
+    // works over the single forwarded port in Codespaces and local dev
+    // containers alike. 5732 is optional (psql from the host). The app listens
+    // dual-stack so the forwarder reaches it via IPv4 or IPv6 localhost.
     "forwardPorts": [
         3000,
         5732

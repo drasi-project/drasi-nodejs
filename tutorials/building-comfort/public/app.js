@@ -3,8 +3,9 @@
 // Data flow:
 //   1. Seed current state from GET /api/state (the SSE reaction only streams
 //      changes, so we need an initial snapshot).
-//   2. Open one EventSource per stream (proxied same-origin at /sse/<path>).
-//      Each message is a Handlebars-shaped change: { op, row }.
+//   2. Open a SINGLE EventSource at /events (the app multiplexes every SSE
+//      reaction route into that one stream, tagging each event with its path).
+//      Each message is a Handlebars-shaped change: { path, msg: { op, row } }.
 //   3. Merge add/update/delete into per-stream maps and render.
 //
 // The app never mutates the UI directly: the control buttons write to Postgres,
@@ -223,29 +224,26 @@ async function seedState() {
 }
 
 function connectStreams() {
-  let anyOpen = false;
-  for (const path of STREAMS) {
-    const source = new EventSource(`/sse/${path}`);
-    source.onmessage = (e) => {
-      try {
-        applyChange(path, JSON.parse(e.data));
-      } catch (err) {
-        console.error("bad SSE message on", path, err);
-      }
-    };
-    source.onopen = () => {
-      anyOpen = true;
-      dom.status.textContent = "live";
-      dom.status.className = "status status--on";
-    };
-    source.onerror = () => {
-      if (!anyOpen) {
-        dom.status.textContent = "reconnecting…";
-        dom.status.className = "status status--off";
-      }
-      // EventSource reconnects automatically.
-    };
-  }
+  // ONE connection for every stream: the app fans the reaction's routes into
+  // this single /events endpoint and tags each event with its stream path.
+  const source = new EventSource("/events");
+  source.onmessage = (e) => {
+    try {
+      const env = JSON.parse(e.data);
+      applyChange(env.path, env.msg);
+    } catch (err) {
+      console.error("bad SSE message", err);
+    }
+  };
+  source.onopen = () => {
+    dom.status.textContent = "live";
+    dom.status.className = "status status--on";
+  };
+  source.onerror = () => {
+    dom.status.textContent = "reconnecting…";
+    dom.status.className = "status status--off";
+    // EventSource reconnects automatically.
+  };
 }
 
 // ---------- Event handling ----------
