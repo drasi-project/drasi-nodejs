@@ -37,6 +37,7 @@ blocks:
 | **[Step 6: Detect Inactivity](#step-6-of-7-detect-inactivity)** | Detect the *absence* of change over time | 4 min |
 | **[Step 7: Join Across Sources](#step-7-of-7-join-across-sources)** | Join messages with live location data from a second source | 5 min |
 | **[How It Works](#how-it-works)** | Understand the sources, the five queries, and the JavaScript reaction | 6 min |
+| **[Putting It All Together](#putting-it-all-together)** | Read the whole app — every source, query, and the reaction — in one file | 3 min |
 
 > **Before you begin**
 >
@@ -87,10 +88,11 @@ npm run demo
 `npm run demo` starts PostgreSQL (seeded with a `Message` table of four messages) and then runs the
 console app in the foreground.
 
-On first start, the app downloads the Drasi plugins it needs (`source/postgres`,
-`bootstrap/postgres`, `source/http`, and `bootstrap/scriptfile`) from `ghcr.io/drasi-project` and
-caches them under `.drasi-plugins/`, connects to the database, bootstraps the four existing messages,
-and starts the five continuous queries. When you see this line, it's ready:
+On first start, the app downloads the Drasi plugins it needs — `source/postgres`,
+`bootstrap/postgres`, `source/http`, and `bootstrap/scriptfile`. It uses `installPlugin`, which
+resolves each one to the build that matches your platform **and** this library version (no tags,
+architecture suffixes, or filenames to work out), then connects to the database, bootstraps the four
+existing messages, and starts the five continuous queries. When you see this line, it's ready:
 
 ```text
 ✅ Getting Started is ready — Drasi is watching for changes.
@@ -104,8 +106,9 @@ the app running; you'll drive all the changes from **Terminal 2**.
 > **Stopping and resetting**
 >
 > Press **Ctrl+C** in Terminal 1 to stop the app. To remove the database container when you're
-> completely done, run `bash scripts/cleanup.sh` (add `--volumes` to also delete the data). The
-> database keeps running between app restarts, so you can stop and start the app freely.
+> completely done, run `docker compose -f database/docker-compose.yml down` (add `--volumes` to also
+> delete the data). The database keeps running between app restarts, so you can stop and start the app
+> freely.
 
 ## Step 3 of 7: Watch Changes
 The first query, `all-messages`, selects every message and keeps the result set continuously up to
@@ -262,25 +265,18 @@ In real systems, related data often lives in different places. Drasi can **join 
 using a *virtual relationship*, so a query traverses data from multiple sources as if it were a
 single graph — and a change from *any* source flows through the join in real time.
 
-Alongside the PostgreSQL source, the app runs a second **HTTP source** called `location-tracker` that
-receives `UserLocation` updates and is seeded from a file (`locations.jsonl`). The
-`messages-with-location` query joins each message to its sender's live location, matching
-`Message.From` to `UserLocation.name`.
+Alongside the PostgreSQL source, the app runs a second **HTTP source** called `location-tracker`. It's
+configured with a custom **webhook**: a `POST /locations` route that accepts a friendly, flat
+`{ name, location, status }` payload and shapes it into a `UserLocation` node. It's also seeded from a
+file (`locations.jsonl`). The `messages-with-location` query joins each message to its sender's live
+location, matching `Message.From` to `UserLocation.name`.
 
-First, simulate Brian moving to a new location by sending an event to the HTTP source:
+First, simulate Brian moving to a new location by POSTing to the webhook:
 
 ```bash
-curl -X POST http://localhost:9000/sources/location-tracker/events \
+curl -X POST http://localhost:9000/locations \
   -H "Content-Type: application/json" \
-  -d '{
-    "operation": "update",
-    "element": {
-      "type": "node",
-      "id": "brian",
-      "labels": ["UserLocation"],
-      "properties": {"name": "Brian Kernighan", "location": "Conference Room B", "status": "away"}
-    }
-  }'
+  -d '{"name": "Brian Kernighan", "location": "Conference Room B", "status": "away"}'
 ```
 
 The change propagates through the join — Brian's message now shows the new location, with `before`
@@ -299,20 +295,12 @@ docker exec getting-started-nodejs-postgres psql -U drasi_user -d getting_starte
 ```
 
 `all-messages` reacts, but `messages-with-location` does **not** — there's no matching `UserLocation`
-for Carol, so the join produces no row. Now give Carol a location:
+for Carol, so the join produces no row. Now give Carol a location — the same simple payload:
 
 ```bash
-curl -X POST http://localhost:9000/sources/location-tracker/events \
+curl -X POST http://localhost:9000/locations \
   -H "Content-Type: application/json" \
-  -d '{
-    "operation": "insert",
-    "element": {
-      "type": "node",
-      "id": "carol",
-      "labels": ["UserLocation"],
-      "properties": {"name": "Carol", "location": "Home Office", "status": "online"}
-    }
-  }'
+  -d '{"name": "Carol", "location": "Home Office", "status": "online"}'
 ```
 
 The join resolves the instant data from both sources is available, and Carol's joined row appears:
@@ -326,13 +314,13 @@ No change to PostgreSQL triggered that — it came entirely from the HTTP source
 symmetric: a change in either source can complete (or invalidate) a match.
 
 ## How It Works
-Everything you just ran is a single Node console app under `tutorials/getting-started/`. Its
-`src/index.mjs` embeds the engine, adds the sources, registers the five queries, and attaches the
-reaction. Here's what each part does.
+Everything you just ran is a single Node console app under `tutorials/getting-started/` — and it's
+one file. `index.mjs` downloads the plugins, adds the sources, registers the five queries, and
+attaches the reaction. Here's what each part does.
 
 ### The Sources
 
-The app connects two sources (`src/index.mjs`). PostgreSQL streams `Message` changes via **logical
+The app connects two sources (`index.mjs`). PostgreSQL streams `Message` changes via **logical
 replication (CDC)**:
 
 ```js
@@ -353,26 +341,53 @@ The `Message` table and columns are quoted and PascalCase in the database (`"Mes
 `"From"`), so the node label and properties Drasi sees match the queries — `(m:Message)`,
 `m.MessageId`, `m.From` — with no change to the query text.
 
-The second source is an **HTTP source** that receives `UserLocation` events and loads its initial data
-from a JSONL file via the **ScriptFile bootstrap provider**:
+The second source is an **HTTP source**. Rather than accept the raw event format, it defines a custom
+**webhook** route that maps a friendly `{ name, location, status }` payload onto a `UserLocation` node
+with Handlebars templates. It also bootstraps its initial data from a JSONL file via the **ScriptFile
+bootstrap provider**:
 
 ```js
-await engine.addSource('http', 'location-tracker',
-  { host: '0.0.0.0', port: 9000 }, true,
-  { kind: 'scriptfile', config: { filePaths: [/* locations.jsonl */] } });
+await engine.addSource('http', 'location-tracker', {
+  host: '0.0.0.0',
+  port: 9000,
+  webhooks: {
+    routes: [{
+      path: '/locations',
+      methods: ['POST'],
+      mappings: [{
+        operation: 'update',            // upsert the user's location node
+        elementType: 'node',
+        template: {
+          id: '{{payload.name}}',
+          labels: ['UserLocation'],
+          properties: {
+            name: '{{payload.name}}',
+            location: '{{payload.location}}',
+            status: '{{payload.status}}',
+          },
+        },
+      }],
+    }],
+  },
+}, true, { kind: 'scriptfile', config: { filePaths: [/* locations.jsonl */] } });
 ```
 
-You POST events to `http://localhost:9000/sources/location-tracker/events` (as you did with `curl` in
-Step 7) shaped as `{ operation, element: { type, id, labels, properties } }`.
+So a caller sends `curl -d '{"name":"...","location":"...","status":"..."}'` to `POST /locations` (as
+you did in Step 7), and the source turns it into a graph change. `{{payload.*}}` reads fields from the
+request body; using the sender's `name` as the node `id` means a later POST for the same person
+updates the same `UserLocation`.
 
 ### The Continuous Queries
 
-All five queries live in `queries.mjs` and are declared up front — with the embedded library you
-describe your topology in code, and every query is running from the moment the app starts. Each one
-is registered the same way:
+All five queries are declared explicitly in `index.mjs`, one `addQuery` call each — with the embedded
+library you describe your topology in code, and every query runs from the moment the app starts. For
+example, the change-detection query:
 
 ```js
-await engine.addQuery(q.id, q.query, q.sources, 'cypher', q.joins);
+await engine.addQuery('all-messages', `
+  MATCH (m:Message)
+  RETURN m.MessageId AS MessageId, m.From AS From, m.Message AS Message
+`, ['messages'], 'cypher');
 ```
 
 | Query | What it does |
@@ -383,7 +398,8 @@ await engine.addQuery(q.id, q.query, q.sources, 'cypher', q.joins);
 | `inactive-senders` | Senders idle > 20s — time-based, via `drasi.trueLater` |
 | `messages-with-location` | Messages joined to live locations — a cross-source join |
 
-The join query lists two sources and declares the virtual relationship that connects them:
+The join query lists two sources and declares the virtual relationship that connects them, inline as
+the fifth argument to `addQuery`:
 
 ```cypher
 MATCH (m:Message)-[:FROM_USER]->(u:UserLocation)
@@ -392,13 +408,16 @@ RETURN m.MessageId AS Id, m.Message AS Message,
 ```
 
 ```js
-const FROM_USER = {
-  id: 'FROM_USER',
-  keys: [
-    { label: 'Message', property: 'From' },
-    { label: 'UserLocation', property: 'name' },
-  ],
-};
+await engine.addQuery('messages-with-location', joinCypher,
+  ['messages', 'location-tracker'], 'cypher', [
+    {
+      id: 'FROM_USER',
+      keys: [
+        { label: 'Message', property: 'From' },
+        { label: 'UserLocation', property: 'name' },
+      ],
+    },
+  ]);
 ```
 
 There's no foreign key between the two systems — Drasi materializes the relationship from these keys
@@ -408,15 +427,24 @@ and maintains the join state, propagating changes from either source into the re
 
 This is where the embedded library differs most from Drasi Server. Instead of configuring a built-in
 reaction, you attach a **callback** with `addJsReaction` and subscribe it to whichever queries you
-care about. It receives every query-result change and does whatever you want — here, it prints:
+care about. It receives every query-result change and does whatever you want — here, a `switch` on the
+change type prints it:
 
 ```js
-await engine.addJsReaction('console', QUERY_IDS, (event) => {
+await engine.addJsReaction('console', [/* all five query ids */], (event) => {
   for (const d of event.results) {
-    if (d.type === 'ADD') console.log(`[ADD] ${JSON.stringify(d.data)}`);
-    else if (d.type === 'DELETE') console.log(`[DELETE] ${JSON.stringify(d.data)}`);
-    else if (d.type === 'UPDATE' || d.type === 'aggregation')
-      console.log(`[UPDATE] ${JSON.stringify(d.before)} -> ${JSON.stringify(d.after)}`);
+    switch (d.type) {
+      case 'ADD':
+        console.log(`[ADD]    ${JSON.stringify(d.data)}`);
+        break;
+      case 'DELETE':
+        console.log(`[DELETE] ${JSON.stringify(d.data)}`);
+        break;
+      case 'UPDATE':
+      case 'aggregation':
+        console.log(`[UPDATE] ${JSON.stringify(d.before)} -> ${JSON.stringify(d.after)}`);
+        break;
+    }
   }
 });
 ```
@@ -425,15 +453,216 @@ Each change is a tagged union: `ADD` and `DELETE` carry `data`; `UPDATE` and `ag
 `before` and `after`. That's the whole reaction — no plugin to install, no template to write. From
 here you could just as easily update another database, call an API, or push to a queue.
 
+## Putting It All Together
+That's the whole tutorial — and it fits in a single file. Here is `index.mjs` end to end (a few
+startup `console.log` lines trimmed for brevity): two sources (one with the custom webhook), the five
+continuous queries, and the one reaction that prints every change.
+
+```js
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { createConnection } from 'node:net';
+
+const require = createRequire(import.meta.url);
+const { Drasi } = require('@drasi/lib');
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const env = process.env;
+
+// PostgreSQL connection — matches database/docker-compose.yml + database/init.sql.
+const PG = {
+  host: env.POSTGRES_HOST || 'localhost',
+  port: Number(env.POSTGRES_PORT || 5632),
+  database: env.POSTGRES_DATABASE || 'getting_started',
+  user: env.POSTGRES_USER || 'drasi_user',
+  password: env.POSTGRES_PASSWORD || 'drasi_password',
+  sslMode: 'prefer',
+  tables: ['Message'],
+  slotName: 'drasi_getting_started_slot',
+  publicationName: 'drasi_getting_started_pub',
+  tableKeys: [{ table: 'Message', keyColumns: ['MessageId'] }],
+};
+
+const HTTP_SOURCE_PORT = Number(env.HTTP_SOURCE_PORT || 9000);
+const LOCATIONS_FILE = join(__dirname, 'locations.jsonl');
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Resolve when a TCP port accepts a connection, or throw after `attempts`. */
+async function waitForPort(host, port, attempts = 60) {
+  for (let i = 0; i < attempts; i++) {
+    const ok = await new Promise((resolve) => {
+      const socket = createConnection({ host, port });
+      socket.once('connect', () => (socket.destroy(), resolve(true)));
+      socket.once('error', () => (socket.destroy(), resolve(false)));
+    });
+    if (ok) return;
+    await sleep(1000);
+  }
+  throw new Error(`PostgreSQL is not reachable at ${host}:${port}. Start it with 'npm run db:up'.`);
+}
+
+/** Print one query-result change, mirroring Drasi's Log Reaction output. */
+function printChange(event) {
+  const diffs = (event.results || []).filter((d) => d.type !== 'noop');
+  if (diffs.length === 0) return;
+  const j = (v) => JSON.stringify(v);
+  console.log(`[drasi] Query '${event.query_id}' (${diffs.length} change${diffs.length === 1 ? '' : 's'}):`);
+  for (const d of diffs) {
+    switch (d.type) {
+      case 'ADD':
+        console.log(`  [ADD]    ${j(d.data)}`);
+        break;
+      case 'DELETE':
+        console.log(`  [DELETE] ${j(d.data)}`);
+        break;
+      case 'UPDATE':
+      case 'aggregation':
+        console.log(`  [UPDATE] ${j(d.before)} -> ${j(d.after)}`);
+        break;
+    }
+  }
+}
+
+async function main() {
+  const engine = await Drasi.create('getting-started', {});
+
+  // 1. Download the plugins and register them. installPlugin resolves each
+  //    reference to the build that is compatible with this addon and made for the
+  //    current platform — no version tags, arch suffixes, or filenames to work out.
+  const pluginsDir = mkdtempSync(join(tmpdir(), 'drasi-plugins-'));
+  await engine.installPlugin('source/postgres', pluginsDir);
+  await engine.installPlugin('bootstrap/postgres', pluginsDir);
+  await engine.installPlugin('source/http', pluginsDir);
+  await engine.installPlugin('bootstrap/scriptfile', pluginsDir);
+  await engine.loadPlugins(pluginsDir);
+
+  await engine.start();
+
+  // 2a. PostgreSQL source: streams `Message` changes via logical replication.
+  await waitForPort(PG.host, PG.port);
+  await engine.addSource('postgres', 'messages', PG, true, { kind: 'postgres', config: PG });
+
+  // 2b. HTTP source with a custom webhook: a flat { name, location, status } POST
+  //     at /locations is shaped into a UserLocation node. Bootstraps from a file.
+  await engine.addSource('http', 'location-tracker', {
+    host: '0.0.0.0',
+    port: HTTP_SOURCE_PORT,
+    webhooks: {
+      routes: [{
+        path: '/locations',
+        methods: ['POST'],
+        mappings: [{
+          operation: 'update',
+          elementType: 'node',
+          template: {
+            id: '{{payload.name}}',
+            labels: ['UserLocation'],
+            properties: {
+              name: '{{payload.name}}',
+              location: '{{payload.location}}',
+              status: '{{payload.status}}',
+            },
+          },
+        }],
+      }],
+    },
+  }, true, { kind: 'scriptfile', config: { filePaths: [LOCATIONS_FILE] } });
+
+  // 3. The five continuous queries, each declared explicitly.
+
+  // Change detection: every message, passed through unchanged.
+  await engine.addQuery('all-messages', `
+    MATCH (m:Message)
+    RETURN m.MessageId AS MessageId, m.From AS From, m.Message AS Message
+  `, ['messages'], 'cypher');
+
+  // Filter: only messages whose text is exactly 'Hello World'.
+  await engine.addQuery('hello-world-senders', `
+    MATCH (m:Message)
+    WHERE m.Message = 'Hello World'
+    RETURN m.MessageId AS Id, m.From AS Sender
+  `, ['messages'], 'cypher');
+
+  // Aggregation: how many times each unique message text has been sent.
+  await engine.addQuery('message-counts', `
+    MATCH (m:Message)
+    RETURN m.Message AS MessageText, count(m) AS Count
+  `, ['messages'], 'cypher');
+
+  // Time / absence of change: senders idle > 20s, via drasi.trueLater.
+  await engine.addQuery('inactive-senders', `
+    MATCH (m:Message)
+    WITH m.From AS MessageFrom, max(drasi.changeDateTime(m)) AS LastMessageTimestamp
+    WHERE LastMessageTimestamp <= datetime.realtime() - duration({ seconds: 20 })
+       OR drasi.trueLater(
+            LastMessageTimestamp <= datetime.realtime() - duration({ seconds: 20 }),
+            LastMessageTimestamp + duration({ seconds: 20 }))
+    RETURN MessageFrom, LastMessageTimestamp
+  `, ['messages'], 'cypher');
+
+  // Cross-source join (PostgreSQL source first; see drasi-project/drasi-core#682).
+  await engine.addQuery('messages-with-location', `
+    MATCH (m:Message)-[:FROM_USER]->(u:UserLocation)
+    RETURN m.MessageId AS Id, m.Message AS Message,
+           m.From AS Sender, u.location AS Location, u.status AS Status
+  `, ['messages', 'location-tracker'], 'cypher', [
+    {
+      id: 'FROM_USER',
+      keys: [
+        { label: 'Message', property: 'From' },
+        { label: 'UserLocation', property: 'name' },
+      ],
+    },
+  ]);
+
+  // 4. One JavaScript reaction, subscribed to every query, that prints changes.
+  await engine.addJsReaction('console', [
+    'all-messages',
+    'hello-world-senders',
+    'message-counts',
+    'inactive-senders',
+    'messages-with-location',
+  ], printChange);
+
+  console.log('\n✅ Getting Started is ready — Drasi is watching for changes.\n');
+
+  // Keep the process alive so the engine keeps streaming until Ctrl+C.
+  setInterval(() => {}, 1 << 30);
+
+  async function shutdown(signal) {
+    try {
+      await engine.close();
+    } catch {
+      /* best-effort */
+    }
+    process.exit(0);
+  }
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+}
+
+main().catch((err) => {
+  console.error('\nFailed to start Getting Started:\n', err);
+  process.exit(1);
+});
+```
+
+**Lines of application logic beyond wiring: just the reaction's `switch`.** The sources, the five
+queries, and the join are all declarative — Drasi does the rest.
+
 ## Clean Up
 When you're finished, stop the app with **Ctrl+C** in Terminal 1, then remove the database container:
 
 ```bash
-# Stop the container, keep data
-bash scripts/cleanup.sh
+# Stop the container, keep the data
+docker compose -f database/docker-compose.yml down
 
 # Stop the container and delete the data volume
-bash scripts/cleanup.sh --volumes
+docker compose -f database/docker-compose.yml down --volumes
 ```
 
 ## What You Learned

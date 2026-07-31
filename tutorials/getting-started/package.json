@@ -9,12 +9,12 @@
     "node": ">=18"
   },
   "scripts": {
-    "start": "node src/index.mjs",
+    "start": "node index.mjs",
     "db:up": "docker compose -f database/docker-compose.yml up -d --wait",
     "db:down": "docker compose -f database/docker-compose.yml down -v",
     "demo": "npm run db:up && npm start"
   },
   "dependencies": {
-    "@drasi/lib": "^0.2.0"
+    "@drasi/lib": "^0.2.2"
   }
 }

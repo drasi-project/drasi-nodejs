@@ -20,4 +20,4 @@ npm install
 echo ""
 echo "✅ Getting Started tutorial environment is ready!"
 echo "   Next: run 'npm run demo' (you are already in tutorials/getting-started),"
-echo "   then drive changes from a second terminal with the scripts in scripts/."
+echo "   then drive changes from a second terminal with 'docker exec ... psql' and 'curl'."
