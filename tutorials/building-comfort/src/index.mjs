@@ -29,7 +29,11 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, '..', 'public');
 const PORT = Number(process.env.WEB_PORT || 3000);
-const HOST = process.env.WEB_HOST || '0.0.0.0';
+// When WEB_HOST is unset we let Node bind on `::` (all interfaces, dual-stack),
+// so the app is reachable via both IPv4 and IPv6 localhost. Port forwarders
+// (VS Code dev containers, Codespaces) sometimes connect over IPv6 `::1`, and an
+// IPv4-only `0.0.0.0` bind would silently fail to forward.
+const HOST = process.env.WEB_HOST || undefined;
 
 // SSE route paths the browser is allowed to subscribe to (from the contract).
 const SSE_PATHS = new Set(STREAMS.map((s) => s.path));
@@ -162,9 +166,10 @@ async function main() {
 
   app.use(express.static(PUBLIC_DIR));
 
-  const server = app.listen(PORT, HOST, () => {
+  const onReady = () =>
     console.log(`\n✅ Building Comfort is ready — open http://localhost:${PORT}\n`);
-  });
+  // Omit the host entirely when unset so Node binds dual-stack (IPv4 + IPv6).
+  const server = HOST ? app.listen(PORT, HOST, onReady) : app.listen(PORT, onReady);
 
   // --- Graceful shutdown ---------------------------------------------------
   let closing = false;
