@@ -65,7 +65,12 @@ async function waitForPort(host, port, attempts = 60) {
  * this module stays focused on topology.
  */
 export async function createEngine(ensurePlugins) {
-  const pluginsDir = join(process.cwd(), '.drasi-plugins');
+  // Cache plugins in a platform-specific subdirectory. The tutorial folder is
+  // often mounted into a dev container, so a Linux (.so) and a macOS (.dylib)
+  // build of the same plugin can otherwise land in one directory — which the
+  // plugin loader rejects as ambiguous. Keying by platform+arch keeps each
+  // host's binaries separate.
+  const pluginsDir = join(process.cwd(), '.drasi-plugins', `${process.platform}-${process.arch}`);
   if (!existsSync(pluginsDir)) mkdirSync(pluginsDir, { recursive: true });
 
   const engine = await Drasi.create('building-comfort', {});
