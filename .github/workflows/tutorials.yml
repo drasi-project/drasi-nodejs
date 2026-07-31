@@ -74,3 +74,50 @@ jobs:
             assert.equal(shaped.comfort, 46);
             console.log('✅ SSE stream contract ok');
           "
+
+  curbside-pickup:
+    name: Curbside Pickup — smoke test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tutorials/curbside-pickup
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: npm install
+      - name: Syntax-check all modules
+        run: node --check src/index.mjs && for f in src/*.mjs queries.mjs; do node --check "$f"; done
+      - name: SSE stream contract is consistent
+        run: |
+          node --input-type=module -e "
+            import assert from 'node:assert';
+            import { STREAMS, buildSseRoutes, reshapeRow } from './src/streams.mjs';
+
+            // Every stream generates added/updated/deleted Handlebars routes,
+            // and the reshaper mirrors the templates' field contract.
+            const routes = buildSseRoutes();
+            for (const s of STREAMS) {
+              const r = routes[s.query];
+              assert.ok(r && r.added && r.updated && r.deleted, s.query + ' has all change routes');
+              assert.equal(r.added.path, '/' + s.path);
+              assert.ok(r.added.template.includes('\"op\":\"add\"'));
+              assert.ok(r.deleted.template.includes('before.'), 'delete reads before');
+              // Templates reference each contract column via the json helper.
+              for (const col of Object.values(s.fields)) {
+                assert.ok(r.added.template.includes('after.' + col), 'template shapes ' + col);
+              }
+            }
+
+            // The delay stream's merge key is derived from orderId (the query has
+            // no 'id' column), so the reshaper maps both from the same source.
+            const delay = STREAMS.find((s) => s.path === 'delay');
+            const shaped = reshapeRow(delay.fields, { orderId: 7, customerName: 'Ava', waitingSinceTimestamp: '2025-01-01T00:00:00Z' });
+            assert.equal(shaped.id, 7);
+            assert.equal(shaped.orderId, 7);
+            assert.equal(shaped.customerName, 'Ava');
+            assert.equal(shaped.waitingSince, '2025-01-01T00:00:00Z');
+            console.log('✅ SSE stream contract ok');
+          "
