@@ -300,18 +300,9 @@ npm run pack:verify     # inspect the tarball contents (npm pack --dry-run)
 npm run publish:public  # npm publish --access public (normally done by CI on a vX.Y.Z tag)
 ```
 
-Maintainers can **optionally** also publish the same version to an internal
-**Azure Artifacts** feed for Microsoft-internal consumption (e.g. to avoid the
-~7-day quarantine delay for newly published public versions on corp-managed
-machines). This is additive and never required for an OSS release:
-
-```bash
-AZURE_ARTIFACTS_REGISTRY_URL=<feed-url> npm run publish:internal
-```
-
-No credentials are committed — authenticate with your normal npm / Azure
-Artifacts auth. See [`docs/releasing.md`](./docs/releasing.md) for the full
-dual-publish model, the `.npmrc` templates, CI setup, and the release runbook.
+No credentials are committed — authenticate with your normal npm auth, or let CI
+publish via an `NPM_TOKEN` secret / OIDC trusted publishing. See
+[`docs/releasing.md`](./docs/releasing.md) for the release pipeline and runbook.
 
 ## License
 
