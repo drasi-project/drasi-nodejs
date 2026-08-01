@@ -128,6 +128,8 @@ starting, just refresh once it's ready.
 
 You'll see the **Building Comfort** UI:
 
+![The Building Comfort UI: three floors of three rooms each, all comfortable at 46, with the overall-comfort gauge, the Simulate toggle, and empty alert panels.](images/ui-overview.png)
+
 - **The building** (the large panel) — rooms grouped by floor, each showing its comfort
   level, a status badge, and its sensor readings. Every room starts at comfort `46`
   (comfortable). Each room card also has **Break**, **Reset**, and **Set** controls.
@@ -137,86 +139,83 @@ You'll see the **Building Comfort** UI:
   only when they need attention.
 - **Simulate** toggle and **Reset all rooms** button — in the header.
 
+Each room card carries its own controls — the readings, a live comfort level, and
+**Break** / **Reset** / **Set**:
+
+![A single room card: its name and comfortable badge, its comfort level (46), the temperature / humidity / CO₂ readings, and the Break, Reset, and Set controls.](images/room-card.png)
+
 The UI updates the instant the data changes — no refreshing. Let's make something change.
 
 ## Step 4 of 4: Drive Change
-With the app running and the UI open, change room readings and watch Drasi react. You can
-do this two ways: from the **UI**, or from **helper scripts** in a second terminal.
+With the app running and the UI open, change room readings from the UI and watch every
+panel react.
 
 > **No middle tier — every change is just a database write**
 >
-> Whether you click a button in the UI or run a helper script, the only thing that happens
-> is a plain SQL `UPDATE` against PostgreSQL — exactly what an existing building-management
-> app would already do. The UI's controls post to the app, which runs the `UPDATE`; the
-> scripts run it directly with `psql`. Either way there's **no event to publish and no call
-> into Drasi**. Drasi observes the row change through PostgreSQL's logical replication
-> (CDC), re-evaluates the affected queries, and the SSE reaction re-shapes and pushes the
-> snapshot on its own.
+> Every control in the UI does exactly one thing: a plain SQL `UPDATE` against PostgreSQL —
+> exactly what an existing building-management app would already do. The button posts to the
+> app, which runs the `UPDATE`; there's **no event to publish and no call into Drasi**. Drasi
+> observes the row change through PostgreSQL's logical replication (CDC), re-evaluates the
+> affected queries, and the SSE reaction re-shapes and pushes the snapshot on its own.
 
 ### Break a room
 
-In the UI, click **Break** on any room card. It pushes that room out of the comfortable
-band (sets `temperature = 40`, `humidity = 20`, `co2 = 700`).
+Click **Break** on any room card. It pushes that room out of the comfortable band (sets
+`temperature = 40`, `humidity = 20`, `co2 = 700`).
 
-Within about a second the UI reacts: the room's card turns blue (too cold — its comfort
-level drops to `4`), the header gauge falls, and entries appear in **Comfort Alerts** and
-**Floor Alerts**.
+Within about a second the whole UI reacts: the room's card turns blue (too cold — its
+comfort level drops to `4`), its floor's average falls, the header gauge drops, and entries
+appear in **Comfort Alerts** and **Floor Alerts**. The browser computed none of that — each
+panel is a continuous-query result the SSE reaction shaped and pushed.
 
-The equivalent from a second terminal:
+![After clicking Break on Floor 01 / Room 01: the card is blue and "too cold" at comfort 4, Floor 01 falls to 32, and the Comfort Alerts and Floor Alerts panels each show an entry.](images/break-room.png)
 
-```bash
-bash scripts/break-room.sh room_01_01_01
-```
+### Set custom values
+
+Each room card has three inputs (🌡️ / 💧 / 🫧) and a **Set** button. Try *partial*
+degradation — make a room too hot without touching humidity or CO₂: set the temperature to
+`82` and click **Set**. That gives `50 + (82-72) + (40-42) + 0 = 58` — above `50`, so the
+room turns red and raises a **Comfort Alert**, while its floor (whose average is exactly
+`50`) stays just inside the band and raises no **Floor Alert**.
+
+![After setting Floor 01 / Room 02 to 82°F: the card is red and "too hot" at comfort 58 with a Comfort Alert, but there is no Floor Alert because the floor average is exactly 50.](images/set-room.png)
 
 ### Reset a room (or all rooms)
 
 Click **Reset** on a room card to return it to comfortable defaults (`70 / 40 / 10`), or
-click **Reset all rooms** in the header to reset the whole building. From a terminal:
-
-```bash
-# Reset one room
-bash scripts/reset-room.sh room_01_01_01
-
-# Reset every room
-bash scripts/reset-room.sh
-```
-
-The alerts clear and the building returns to green.
-
-### Set custom values
-
-Each room card has three inputs (🌡️ / 💧 / 🫧) and a **Set** button. Try partial
-degradation — make a room too hot without touching CO2, e.g. `82 / 40 / 10`, and click
-**Set**. From a terminal:
-
-```bash
-# set-room.sh <room_id> <temperature> <humidity> <co2>
-bash scripts/set-room.sh room_01_02_03 82 40 10
-```
-
-That gives `50 + (82-72) + (40-42) + 0 = 58` — above 50, so the room and its floor raise
-alerts even though humidity and CO2 are fine.
+**Reset all rooms** in the header to reset the whole building. The alerts clear and every
+panel returns to green.
 
 ### Let it run hands-free
 
 Flip the **Simulate** toggle in the header. The app picks a random room every few seconds
 and assigns new readings, so comfort levels rise and fall and alerts come and go on their
-own. Flip it off to stop, then click **Reset all rooms**. The same thing is available as
-a script:
+own — a live stress test of the whole pipeline. Flip it off to stop, then click **Reset all
+rooms**.
 
-```bash
-bash scripts/simulate.sh
-```
+![With Simulate on: several rooms have drifted hot or cold, the gauge reads 51 (red), and the Comfort Alerts and Floor Alerts panels list the rooms and floors currently out of band.](images/simulate.png)
+
+> **Prefer the terminal?**
+>
+> Because every change is just a database write, you can drive the exact same reactions with
+> `psql` from a second terminal — no app endpoint involved:
+>
+> ```bash
+> docker exec building-comfort-nodejs-postgres psql -U drasi_user -d building_comfort \
+>   -c "UPDATE \"Room\" SET temperature = 40, humidity = 20, co2 = 700 WHERE id = 'room_01_01_01';"
+> ```
+>
+> Watch the UI react exactly as if you had clicked **Break**.
 
 ## How It Works
-Everything you just ran is a single Node app under `tutorials/building-comfort/`. Its
-`src/index.mjs` embeds the engine, builds the topology, wires the SSE reaction, and serves
-the UI. Here's what each part does.
+Everything you just ran is a single Node app under `tutorials/building-comfort/`. One file,
+`index.mjs`, embeds the engine, builds the topology, wires the SSE reaction, and serves the
+UI (the browser front end lives in `public/`). Here's what each part does.
 
 ### The Source
 
 The app connects a PostgreSQL **CDC source** to the `Building`, `Floor`, and `Room`
-tables (`src/engine.mjs`):
+tables:
 
 ```js
 await engine.addSource('postgres', 'building-facilities', {
@@ -254,7 +253,7 @@ floor( 50 + (r.temperature - 72) + (r.humidity - 42)
       + CASE WHEN r.co2 > 500 THEN (r.co2 - 500) / 25 ELSE 0 END )
 ```
 
-There are six queries (all defined in `queries.mjs`):
+There are six queries, each registered with its own `addQuery` call:
 
 | Query | What it returns |
 | ----- | --------------- |
@@ -347,7 +346,7 @@ This is where the Node version differs most from the Drasi Server tutorial's *da
 reaction — but the mechanism is the **same built-in SSE reaction** the
 [Getting Started tutorial](https://github.com/drasi-project/learning-drasi-server) uses.
 The app loads the `reaction/sse` plugin from the OCI registry and adds it with
-[`addReaction`](https://drasi-project.github.io/drasi-nodejs/docs/api/) (`src/engine.mjs`).
+[`addReaction`](https://drasi-project.github.io/drasi-nodejs/docs/api/).
 The reaction opens an HTTP endpoint and streams each subscribed query's result **changes**
 to the browser over [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events).
 
@@ -378,8 +377,9 @@ await engine.addReaction('sse', 'building-comfort-sse', [
 ```
 
 `{{json ...}}` is one of the reaction's Handlebars helpers; it serializes each value as valid
-JSON. The templates and the query-to-path mapping live in one place, `src/streams.mjs`, which
-generates both the reaction config above and a matching reshaper for the initial snapshot. The
+JSON. In the code, a small `sseRoute(path, shape)` helper turns each query's row *shape* into
+those three templates, and the same shapes drive a matching reshaper for the initial snapshot —
+so the browser sees an identical payload whether it arrives as a live change or in the seed. The
 aggregate queries (`floor-comfort-level-calc`, `building-comfort-level-calc`, `floor-alert`)
 stream exactly the same way — the reaction renders their `avg()` changes through the `updated`
 template, keyed by floor or building id.
@@ -392,7 +392,7 @@ Finally, the SSE reaction listens on its own port (`8081`) and serves each query
 route. Rather than have the browser open one `EventSource` per route — which, with the
 browser's ~6-connections-per-host HTTP/1.1 limit, would eat into the connections the control
 `fetch()`es need — the app opens all of those routes itself and **multiplexes** them into a
-**single** same-origin stream at `GET /events` (`src/index.mjs`). Each forwarded event is
+**single** same-origin stream at `GET /events`. Each forwarded event is
 tagged with its stream path (`{ "path": …, "msg": { op, row } }`). Node has no such per-host
 limit, and only one port needs forwarding in Codespaces or a dev container.
 
@@ -445,6 +445,5 @@ bash scripts/cleanup.sh --volumes
 - Because Drasi emits only what *changed*, everything updates the instant the data does,
   with no polling.
 
-From here, try editing the comfort formula in `queries.mjs`, changing the Handlebars
-templates in `src/streams.mjs`, adding a new alert query, or pointing the app at your own
-data.
+From here, try editing the comfort formula, changing the Handlebars templates, adding a new
+alert query, or pointing the app at your own data — it's all in one file, `index.mjs`.

@@ -43,38 +43,44 @@ jobs:
           node-version: "22"
       # This tutorial uses @drasi/lib's installPlugin API (>= 0.2.2). Until that
       # release is published, `npm install` can't resolve the pinned version, so
-      # the smoke test validates the app statically (streams.mjs is dependency-free).
-      # A full run needs Docker + PostgreSQL and is exercised in the dev container.
-      - name: Syntax-check all modules
-        run: node --check src/index.mjs && for f in src/*.mjs queries.mjs; do node --check "$f"; done
-      - name: SSE stream contract is consistent
+      # the smoke test validates the single-file app statically. A full run needs
+      # Docker + PostgreSQL and is exercised in the dev container.
+      - name: Syntax-check the app
+        run: node --check index.mjs
+      - name: Topology + SSE contract is consistent
         run: |
           node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
             import assert from 'node:assert';
-            import { STREAMS, buildSseRoutes, reshapeRow } from './src/streams.mjs';
+            const src = readFileSync('index.mjs', 'utf8');
 
-            // Every stream generates added/updated/deleted Handlebars routes,
-            // and the reshaper mirrors the templates' field contract.
-            const routes = buildSseRoutes();
-            for (const s of STREAMS) {
-              const r = routes[s.query];
-              assert.ok(r && r.added && r.updated && r.deleted, s.query + ' has all change routes');
-              assert.equal(r.added.path, '/' + s.path);
-              assert.ok(r.added.template.includes('\"op\":\"add\"'));
-              assert.ok(r.deleted.template.includes('before.'), 'delete reads before');
-              // Templates reference each contract column via the json helper.
-              for (const col of Object.values(s.fields)) {
-                assert.ok(r.added.template.includes('after.' + col), 'template shapes ' + col);
-              }
+            // Six queries, each its own addQuery call, in order.
+            const ids = [...src.matchAll(/addQuery\('([^']+)'/g)].map((m) => m[1]);
+            assert.deepEqual(ids, [
+              'building-comfort-ui', 'floor-comfort-level-calc', 'building-comfort-level-calc',
+              'room-alert', 'floor-alert', 'building-alert',
+            ], 'six queries in order');
+
+            // Synthetic joins walk Room -> Floor -> Building.
+            assert.ok(src.includes(\"id: 'PART_OF_FLOOR'\") && src.includes(\"id: 'PART_OF_BUILDING'\"), 'declares synthetic joins');
+            assert.ok(src.includes('CASE WHEN r.co2 > 500'), 'shares the comfort formula');
+
+            // The SSE reaction routes the five streamed queries to their UI paths.
+            for (const [q, path] of [
+              ['building-comfort-ui', 'rooms'],
+              ['floor-comfort-level-calc', 'floor-comfort'],
+              ['building-comfort-level-calc', 'building'],
+              ['room-alert', 'room-alerts'],
+              ['floor-alert', 'floor-alerts'],
+            ]) {
+              assert.ok(new RegExp(\"'\" + q + \"':\\\\s*sseRoute\\\\('\" + path + \"'\").test(src), q + ' -> /' + path);
             }
+            // building-alert is declared but not streamed (no route).
+            assert.ok(!/'building-alert':\s*sseRoute/.test(src), 'building-alert is not streamed');
 
-            // reshapeRow maps raw PascalCase columns to the output contract.
-            const rooms = STREAMS.find((s) => s.path === 'rooms');
-            const shaped = reshapeRow(rooms.fields, { RoomId: 'r1', RoomName: 'Room 01', ComfortLevel: 46 });
-            assert.equal(shaped.id, 'r1');
-            assert.equal(shaped.name, 'Room 01');
-            assert.equal(shaped.comfort, 46);
-            console.log('✅ SSE stream contract ok');
+            // /api/state reshapes every stream for the initial snapshot.
+            assert.ok((src.match(/reshape\(/g) || []).length >= 5, '/api/state reshapes every stream');
+            console.log('✅ topology + SSE contract ok');
           "
 
   curbside-pickup:
