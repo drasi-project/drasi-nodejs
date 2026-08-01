@@ -9,6 +9,8 @@ release process.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-31
+
 ### Added
 
 - **Platform-aware plugin resolution** — new `resolvePlugin(reference)` and
