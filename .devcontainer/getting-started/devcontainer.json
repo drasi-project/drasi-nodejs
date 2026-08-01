@@ -1,0 +1,59 @@
+{
+    // Prebuilt javascript-node image (Node + npm baked in) so the container
+    // build does not depend on installing Node/pnpm/yarn from the npm registry
+    // at build time — that step is a common transient point of failure.
+    "name": "Drasi Node.js — Getting Started Tutorial",
+    "image": "mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm",
+    "features": {
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {
+            "version": "29",
+            "moby": false
+        }
+    },
+    "postCreateCommand": "bash ../../.devcontainer/getting-started/post-create.sh",
+    "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}/tutorials/getting-started",
+    "runArgs": [
+        "--privileged",
+        "--init",
+        "--ipc=host"
+    ],
+    // This is a console app — there's no web UI. The app's embedded HTTP source
+    // listens on 9000 for location events (you POST to it with curl in the last
+    // step); 5632 is the tutorial PostgreSQL (optional, for psql from the host).
+    // Everything works inside the container terminals, so forwarding is only a
+    // convenience for host-side tools.
+    "forwardPorts": [
+        9000,
+        5632
+    ],
+    "portsAttributes": {
+        "9000": {
+            "label": "HTTP source (location events)",
+            "onAutoForward": "silent"
+        },
+        "5632": {
+            "label": "PostgreSQL",
+            "onAutoForward": "silent"
+        }
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "humao.rest-client"
+            ],
+            "settings": {
+                "editor.formatOnSave": true
+            }
+        }
+    },
+    "remoteUser": "node",
+    "remoteEnv": {
+        "LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}"
+    },
+    "containerEnv": {
+        "POSTGRES_HOST": "localhost",
+        "POSTGRES_PORT": "5632",
+        "POSTGRES_HOST_PORT": "5632",
+        "HTTP_SOURCE_PORT": "9000"
+    }
+}

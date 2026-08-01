@@ -57,6 +57,21 @@ defaultContentLanguageInSubdir = false
     extended = true
     min = "0.110.0"
 
+  # Mount the repo-root `tutorials/` directory into the docs site so each
+  # tutorial's authored `_index.md` renders as a docs page under
+  # /docs/tutorials/. Because we declare content mounts here, we must also
+  # re-declare Hugo's default `content` mount. Only `_index.md` files and any
+  # `images/` are surfaced — the runnable app code, scripts, database, and
+  # node_modules are excluded so they never become site content.
+  [[module.mounts]]
+    source = "content"
+    target = "content"
+  [[module.mounts]]
+    source = "../tutorials"
+    target = "content/docs/tutorials"
+    includeFiles = ["**/_index.md", "**/images/**"]
+    excludeFiles = ["**/node_modules/**", "**/.drasi-plugins/**"]
+
 # UI customization
 [params]
   # Built-in (offline) lunr.js search — no external service required.

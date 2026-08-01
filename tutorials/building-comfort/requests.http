@@ -1,0 +1,44 @@
+### Building Comfort — HTTP requests
+#
+# Ready-made requests for the app's control endpoints. In VS Code, install the
+# "REST Client" extension (humao.rest-client) and click "Send Request" above any
+# request. The app must be running (npm run demo).
+
+@host = http://localhost:3000
+
+### List all rooms with their current readings
+GET {{host}}/api/rooms
+
+### Break a room (too hot / dry / high CO2)
+POST {{host}}/api/rooms/room_01_01_01
+Content-Type: application/json
+
+{ "temperature": 40, "humidity": 20, "co2": 700 }
+
+### Set custom readings for a room
+POST {{host}}/api/rooms/room_01_02_03
+Content-Type: application/json
+
+{ "temperature": 82, "humidity": 40, "co2": 10 }
+
+### Reset a single room to comfortable defaults
+POST {{host}}/api/rooms/room_01_01_01/reset
+
+### Reset every room
+POST {{host}}/api/reset
+
+### Turn the simulator on
+POST {{host}}/api/simulate
+Content-Type: application/json
+
+{ "enabled": true }
+
+### Turn the simulator off
+POST {{host}}/api/simulate
+Content-Type: application/json
+
+{ "enabled": false }
+
+### Subscribe to the live snapshot stream (Server-Sent Events)
+GET {{host}}/events
+Accept: text/event-stream

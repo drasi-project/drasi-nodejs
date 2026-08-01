@@ -1,0 +1,198 @@
+# Validate the runnable tutorials: generated READMEs are up to date and each
+# tutorial app installs and passes a lightweight smoke test. A full end-to-end
+# run (Postgres + OCI plugin download) is intentionally out of scope for CI.
+name: Tutorials
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "tutorials/**"
+      - "scripts/render-tutorials.py"
+      - ".github/workflows/tutorials.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "tutorials/**"
+      - "scripts/render-tutorials.py"
+      - ".github/workflows/tutorials.yml"
+
+jobs:
+  render-check:
+    name: Generated READMEs up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify tutorial READMEs match _index.md
+        run: python3 scripts/render-tutorials.py --check
+
+  building-comfort:
+    name: Building Comfort — smoke test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tutorials/building-comfort
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # This tutorial uses @drasi/lib's installPlugin API (>= 0.2.2). Until that
+      # release is published, `npm install` can't resolve the pinned version, so
+      # the smoke test validates the single-file app statically. A full run needs
+      # Docker + PostgreSQL and is exercised in the dev container.
+      - name: Syntax-check the app
+        run: node --check index.mjs
+      - name: Topology + SSE contract is consistent
+        run: |
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            import assert from 'node:assert';
+            const src = readFileSync('index.mjs', 'utf8');
+
+            // Six queries, each its own addQuery call, in order.
+            const ids = [...src.matchAll(/addQuery\('([^']+)'/g)].map((m) => m[1]);
+            assert.deepEqual(ids, [
+              'building-comfort-ui', 'floor-comfort-level-calc', 'building-comfort-level-calc',
+              'room-alert', 'floor-alert', 'building-alert',
+            ], 'six queries in order');
+
+            // Synthetic joins walk Room -> Floor -> Building.
+            assert.ok(src.includes(\"id: 'PART_OF_FLOOR'\") && src.includes(\"id: 'PART_OF_BUILDING'\"), 'declares synthetic joins');
+            assert.ok(src.includes('CASE WHEN r.co2 > 500'), 'shares the comfort formula');
+
+            // The SSE reaction routes the five streamed queries to their UI paths.
+            for (const [q, path] of [
+              ['building-comfort-ui', 'rooms'],
+              ['floor-comfort-level-calc', 'floor-comfort'],
+              ['building-comfort-level-calc', 'building'],
+              ['room-alert', 'room-alerts'],
+              ['floor-alert', 'floor-alerts'],
+            ]) {
+              assert.ok(new RegExp(\"'\" + q + \"':\\\\s*sseRoute\\\\('\" + path + \"'\").test(src), q + ' -> /' + path);
+            }
+            // building-alert is declared but not streamed (no route).
+            assert.ok(!/'building-alert':\s*sseRoute/.test(src), 'building-alert is not streamed');
+
+            // /api/state reshapes every stream for the initial snapshot.
+            assert.ok((src.match(/reshape\(/g) || []).length >= 5, '/api/state reshapes every stream');
+            console.log('✅ topology + SSE contract ok');
+          "
+
+  curbside-pickup:
+    name: Curbside Pickup — smoke test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tutorials/curbside-pickup
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # This tutorial uses @drasi/lib's installPlugin API (>= 0.2.2). Until that
+      # release is published, `npm install` can't resolve the pinned version, so
+      # the smoke test validates the single-file app statically. A full run needs
+      # Docker + the databases and is exercised in the dev container.
+      - name: Syntax-check the app
+        run: node --check index.mjs
+      - name: Topology + SSE contract is consistent
+        run: |
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            import assert from 'node:assert';
+            const src = readFileSync('index.mjs', 'utf8');
+
+            // Six queries, each its own addQuery call, in order.
+            const ids = [...src.matchAll(/addQuery\('([^']+)'/g)].map((m) => m[1]);
+            assert.deepEqual(ids, [
+              'orders-preparing', 'orders-ready', 'vehicles-parking', 'vehicles-curbside',
+              'delivery', 'delay',
+            ], 'six queries in order');
+
+            // The cross-source join + temporal query.
+            assert.ok(src.includes(\"id: 'PICKUP_BY'\"), 'declares the PICKUP_BY join');
+            assert.ok(/\(o:orders\)-\[:PICKUP_BY\]->\(v:vehicles\)/.test(src), 'join traverses PICKUP_BY');
+            assert.ok(src.includes('drasi.trueFor'), 'delay uses drasi.trueFor');
+            // retail-ops (PostgreSQL) is listed first in both joins (drasi-core#682).
+            assert.ok(!/\['physical-ops', 'retail-ops'\]/.test(src), 'joins list retail-ops first');
+
+            // The SSE reaction routes all six queries to their UI paths.
+            for (const [q, path] of [
+              ['orders-preparing', 'orders-preparing'],
+              ['orders-ready', 'orders-ready'],
+              ['vehicles-parking', 'vehicles-parking'],
+              ['vehicles-curbside', 'vehicles-curbside'],
+              ['delivery', 'delivery'],
+              ['delay', 'delay'],
+            ]) {
+              assert.ok(new RegExp(\"'\" + q + \"':\\\\s*sseRoute\\\\('\" + path + \"'\").test(src), q + ' -> /' + path);
+            }
+            // The delay stream's merge id is derived from orderId (no 'id' column).
+            assert.ok(/DELAY_SHAPE = \{[^}]*id: 'orderId'/.test(src), 'delay id maps from orderId');
+
+            // /api/state reshapes every stream for the initial snapshot.
+            assert.ok((src.match(/reshape\(/g) || []).length >= 6, '/api/state reshapes every stream');
+            console.log('✅ topology + SSE contract ok');
+          "
+
+  getting-started:
+    name: Getting Started — smoke test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tutorials/getting-started
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # The app depends on @drasi/lib's installPlugin API (>= 0.2.2). Until that
+      # release is published, `npm install` can't resolve the pinned version, so this
+      # smoke test validates the single-file app statically. A full run needs Docker +
+      # PostgreSQL and is exercised manually / in the dev container.
+      - name: Syntax-check the app
+        run: node --check index.mjs
+      - name: Continuous-query topology is consistent
+        run: |
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            import assert from 'node:assert';
+            const src = readFileSync('index.mjs', 'utf8');
+
+            // Five queries, each declared with its own addQuery call, in order.
+            const ids = [...src.matchAll(/addQuery\('([^']+)'/g)].map((m) => m[1]);
+            assert.deepEqual(ids, [
+              'all-messages', 'hello-world-senders', 'message-counts',
+              'inactive-senders', 'messages-with-location',
+            ], 'five queries in order');
+
+            // Only the join query names the second source and the FROM_USER join.
+            assert.ok(src.includes(\"'messages', 'location-tracker'\"), 'join reads both sources');
+            assert.ok(src.includes(\"id: 'FROM_USER'\"), 'declares the FROM_USER join');
+            assert.ok(/\(m:Message\)-\[:FROM_USER\]->\(u:UserLocation\)/.test(src), 'join query traverses FROM_USER');
+
+            // The time-based query uses drasi.trueLater; the aggregation uses count().
+            assert.ok(src.includes('drasi.trueLater'), 'inactive-senders uses drasi.trueLater');
+            assert.ok(/count\(m\)/.test(src), 'message-counts uses count()');
+
+            // One reaction subscribes to the queries.
+            assert.ok(/addJsReaction\('console'/.test(src), 'registers the console reaction');
+            console.log('✅ continuous-query topology ok');
+          "
+      - name: locations.jsonl bootstrap file is valid
+        run: |
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            import assert from 'node:assert';
+            const lines = readFileSync('locations.jsonl', 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+            assert.equal(lines[0].kind, 'Header', 'first record is a Header');
+            const nodes = lines.filter((l) => l.kind === 'Node');
+            assert.ok(nodes.length >= 1, 'has UserLocation nodes');
+            assert.ok(nodes.every((n) => n.labels.includes('UserLocation') && n.properties.name), 'nodes are labelled UserLocation with a name');
+            console.log('✅ locations.jsonl ok (' + nodes.length + ' nodes)');
+          "

@@ -1,0 +1,20 @@
+{
+  "name": "getting-started-tutorial",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Getting Started tutorial for @drasi/lib: a console app that embeds the Drasi engine over a PostgreSQL message feed (plus an HTTP source), runs five continuous queries, and prints every change to the console with a JavaScript reaction.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "db:up": "docker compose -f database/docker-compose.yml up -d --wait",
+    "db:down": "docker compose -f database/docker-compose.yml down -v",
+    "demo": "npm run db:up && npm start"
+  },
+  "dependencies": {
+    "@drasi/lib": "^0.2.2"
+  }
+}

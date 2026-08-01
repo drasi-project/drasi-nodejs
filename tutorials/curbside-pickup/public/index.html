@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<!--
+  Curbside Pickup — single integrated UI (no build step).
+  Left: the two operational systems (Orders in PostgreSQL, Vehicles in MySQL)
+  you drive. Right: the live Drasi views (Matched + Delayed) updated by the SSE
+  reaction. Bottom: the SQL log showing which database each change hit.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Curbside Pickup · Drasi</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%92%3C/text%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">🛒</span>
+        <div>
+          <h1>Curbside Pickup</h1>
+          <p class="subtitle">
+            Live via Drasi ·
+            <span id="status" class="status status--off">connecting…</span>
+          </p>
+        </div>
+      </div>
+      <button id="reset" class="btn btn--ghost">Reset</button>
+    </header>
+
+    <main class="layout">
+      <!-- Control side: the two operational systems you drive. -->
+      <section class="col col--control">
+        <div class="panel">
+          <h2>🍕 Orders <span class="tag tag--pg">Retail Ops · PostgreSQL</span></h2>
+          <ul id="orders" class="list"><li class="empty">Loading…</li></ul>
+        </div>
+        <div class="panel">
+          <h2>🚗 Vehicles <span class="tag tag--my">Physical Ops · MySQL</span></h2>
+          <ul id="vehicles" class="list"><li class="empty">Loading…</li></ul>
+        </div>
+      </section>
+
+      <!-- Live Drasi side: continuous queries streamed by the SSE reaction. -->
+      <section class="col col--live">
+        <div class="panel panel--match">
+          <h2>📦 Matched Orders <span class="hint">ready + at the curbside</span></h2>
+          <ul id="delivery" class="list"><li class="empty">—</li></ul>
+        </div>
+        <div class="panel panel--delay">
+          <h2>⚠️ Delayed Orders <span class="hint">waiting &gt; 10s, not ready</span></h2>
+          <ul id="delay" class="list"><li class="empty">—</li></ul>
+        </div>
+      </section>
+    </main>
+
+    <section class="sqllog">
+      <h2>SQL Log <span class="hint">every change is a plain UPDATE against one of the two databases</span></h2>
+      <ul id="log" class="log"></ul>
+    </section>
+
+    <footer class="pagefoot">
+      Toggle an order or a vehicle above — each is a plain SQL <code>UPDATE</code> against one
+      database. Drasi joins the two systems by license plate, and the SSE reaction pushes the
+      shaped change to <strong>Matched</strong> and <strong>Delayed</strong> in real time.
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

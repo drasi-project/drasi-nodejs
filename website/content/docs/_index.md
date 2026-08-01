@@ -20,4 +20,6 @@ the [Drasi](https://drasi.io) continuous-query engine directly in your applicati
 - **[Guides](guides/)** — task-focused walkthroughs: JavaScript sources and
   reactions, native plugins, error handling, and TypeScript types.
 - **[API Reference](api/)** — every method on the `Drasi` class.
+- **[Tutorials](tutorials/)** — hands-on, end-to-end apps you can run, like the
+  [Building Comfort](tutorials/building-comfort/) real-time monitoring demo.
 - **[Examples](examples/)** — runnable scripts and the end-to-end trading demo.

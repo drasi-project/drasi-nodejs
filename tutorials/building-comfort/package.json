@@ -1,0 +1,22 @@
+{
+  "name": "building-comfort-tutorial",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Building Comfort tutorial for @drasi/lib: real-time smart-building monitoring with PostgreSQL CDC, six continuous queries, and an SSE reaction that shapes payloads with Handlebars.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "db:up": "docker compose -f database/docker-compose.yml up -d --wait",
+    "db:down": "docker compose -f database/docker-compose.yml down -v",
+    "demo": "npm run db:up && npm start"
+  },
+  "dependencies": {
+    "@drasi/lib": "^0.2.2",
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}

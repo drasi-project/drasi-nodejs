@@ -1,0 +1,35 @@
+### Curbside Pickup — HTTP requests
+#
+# Ready-made requests for the app's control endpoints. In VS Code, install the
+# "REST Client" extension (humao.rest-client) and click "Send Request" above any
+# request. The app must be running (npm run demo).
+#
+# Every toggle is a plain SQL UPDATE against PostgreSQL (orders) or MySQL
+# (vehicles); Drasi observes the change through CDC and re-evaluates the queries.
+
+@host = http://localhost:3000
+
+### Current state (initial snapshot of every stream) + SQL log
+GET {{host}}/api/state
+
+### SQL log only
+GET {{host}}/api/log
+
+### Toggle order 1 (preparing <-> ready) — PostgreSQL
+POST {{host}}/api/orders/1/toggle
+
+### Toggle order 2 (preparing <-> ready) — PostgreSQL
+POST {{host}}/api/orders/2/toggle
+
+### Move vehicle A1234 (Parking <-> Curbside) — MySQL
+POST {{host}}/api/vehicles/A1234/toggle
+
+### Move vehicle B5678 (Parking <-> Curbside) — MySQL
+POST {{host}}/api/vehicles/B5678/toggle
+
+### Reset everything (all orders preparing, all vehicles Parking)
+POST {{host}}/api/reset
+
+### Live event stream (multiplexes every SSE reaction route; Ctrl+C to stop)
+GET {{host}}/events
+Accept: text/event-stream

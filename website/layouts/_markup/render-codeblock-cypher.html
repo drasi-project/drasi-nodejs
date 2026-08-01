@@ -1,0 +1,41 @@
+{{- /*
+  Code block render hook for Cypher.
+
+  Chroma (Hugo's built-in highlighter) has no Cypher lexer, and its nearest
+  relative (GQL) mis-tokenizes Cypher badly — it does not recognise MATCH /
+  WHERE / RETURN as keywords and flags dots, quotes and `->` as errors. So we
+  tokenize Cypher here and emit the same CSS token classes Chroma uses
+  (`.k` keyword, `.s1` string, `.c1` comment, `.nf` function, `.m` number),
+  wrapped in the standard `.highlight > pre.chroma` markup. That reuses the
+  site's Chroma theme, the copy-to-clipboard button, and the code-block
+  styling, so Cypher blocks look just like the bash / js / yaml blocks around
+  them.
+
+  The fenced language stays ```cypher in the source and in the generated
+  README.md files, so GitHub's own Cypher highlighting still applies there.
+
+  Tokenizing with ordered regex replacements (rather than a real lexer) is a
+  deliberate trade-off: our Cypher uses uppercase keywords and lowercase
+  identifiers/strings, so a keyword never collides with identifier or string
+  text. Comments and strings are wrapped first; a final pass then flattens any
+  token that ended up inside a comment so the comment stays one colour.
+*/ -}}
+{{- $code := trim .Inner "\n\r" -}}
+{{- /* 1. Escape HTML (keep quotes literal so string matching stays simple). */ -}}
+{{- $code = $code | replaceRE "&" "&amp;" | replaceRE "<" "&lt;" | replaceRE ">" "&gt;" -}}
+{{- /* 2. Line comments (// ... to end of line). */ -}}
+{{- $code = $code | replaceRE "(//[^\n]*)" "<span class=\"c1\">${1}</span>" -}}
+{{- /* 3. Single-quoted string literals. */ -}}
+{{- $code = $code | replaceRE "('[^'\n]*')" "<span class=\"s1\">${1}</span>" -}}
+{{- /* 4. Keywords (Cypher convention is uppercase; match case-sensitively). */ -}}
+{{- $code = $code | replaceRE "\\b(MATCH|OPTIONAL|WHERE|RETURN|WITH|AND|OR|XOR|NOT|AS|ORDER|BY|SKIP|LIMIT|CREATE|MERGE|DELETE|DETACH|SET|REMOVE|UNWIND|UNION|CALL|YIELD|CASE|WHEN|THEN|ELSE|END|DISTINCT|IN|STARTS|ENDS|CONTAINS|IS|NULL|TRUE|FALSE|ASC|DESC|ON|COUNT)\\b" "<span class=\"k\">${1}</span>" -}}
+{{- /* 5. Function calls: a name (incl. drasi.* helpers) immediately before '('. */ -}}
+{{- $code = $code | replaceRE "(\\bdrasi\\.[A-Za-z]+|\\b(?:duration|floor|avg|count|sum|min|max|timestamp|coalesce|toInteger|toFloat|listMax|listMin))(\\()" "<span class=\"nf\">${1}</span>${2}" -}}
+{{- /* 6. Numeric literals. */ -}}
+{{- $code = $code | replaceRE "\\b([0-9]+)\\b" "<span class=\"m\">${1}</span>" -}}
+{{- /* 7. Flatten any token that landed inside a comment so it stays one colour
+       (repeat a few times to cover comments containing several tokens). */ -}}
+{{- range seq 4 -}}
+{{- $code = $code | replaceRE "(<span class=\"c1\">[^\n]*?)<span class=\"[a-z0-9]+\">([^<]*)</span>" "${1}${2}" -}}
+{{- end -}}
+<div class="highlight"><pre tabindex="0" class="chroma"><code class="language-cypher" data-lang="cypher">{{ $code | safeHTML }}</code></pre></div>

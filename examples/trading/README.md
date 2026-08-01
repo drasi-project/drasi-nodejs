@@ -107,10 +107,11 @@ and are ported verbatim from the upstream demo.
 
 ## Notes & limitations
 
-- The demo seeds Postgres once at container init. The Drasi source creates its
-  own logical replication slot on first connect (the slot is intentionally **not**
-  pre-created in `init.sql`, which would otherwise make CDC replay the seed rows
-  on top of the bootstrap snapshot and double-count them).
+- The demo seeds Postgres once at container init. The Drasi source creates and
+  manages its own logical replication slot on first connect, so `init.sql` doesn't
+  pre-create one — it isn't needed. (The source gates CDC streaming on a bootstrap
+  snapshot boundary, so each row is delivered once whether or not the slot is
+  pre-created.)
 - Out of scope (kept in the upstream demo): limit orders / broker source,
   `drasi.trueFor` stale-order queries, packaging installers, cross-platform
   prebuilds, and running Postgres without Docker.

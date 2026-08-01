@@ -1,0 +1,93 @@
+# Copyright 2025 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Two independent databases for the Curbside Pickup tutorial:
+#   - postgres : the Retail Operations store (orders)
+#   - mysql    : the Physical Operations store (vehicles)
+# Both are configured for change data capture (CDC) so Drasi can stream their
+# changes in real time.
+
+name: curbside-pickup-nodejs
+
+services:
+  # ---------------------------------------------------------------------------
+  # Retail Operations - PostgreSQL (orders)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: curbside-pickup-nodejs-postgres
+    environment:
+      POSTGRES_DB: RetailOperations
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_admin
+    command:
+      # wal_level=logical is required for logical replication (CDC).
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+    ports:
+      - "${POSTGRES_HOST_PORT:-5742}:5432"
+    volumes:
+      - ./postgres-init.sql:/docker-entrypoint-initdb.d/postgres-init.sql:ro
+      - curbside_nodejs_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # Probe over TCP (-h localhost), not the Unix socket: on first init the
+      # postgres image runs a temporary socket-only server to create POSTGRES_DB;
+      # a socket probe can report "ready" before RetailOperations exists.
+      test: ["CMD-SHELL", "pg_isready -h localhost -U postgres -d RetailOperations"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Physical Operations - MySQL (vehicles)
+  # ---------------------------------------------------------------------------
+  # The Drasi MySQL source captures changes from the binary log (binlog), so the
+  # server is started with ROW-based binary logging, full row images, full row
+  # metadata (column names) and GTID mode - all required by the source.
+  mysql:
+    image: mysql:8.0
+    container_name: curbside-pickup-nodejs-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-root_admin}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-PhysicalOperations}"
+      MYSQL_USER: "${MYSQL_USER:-drasi_user}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:-drasi_password}"
+    command:
+      - "--server-id=1"
+      - "--log-bin=mysql-bin"
+      - "--binlog-format=ROW"
+      - "--binlog-row-image=FULL"
+      - "--binlog-row-metadata=FULL"
+      - "--gtid-mode=ON"
+      - "--enforce-gtid-consistency=ON"
+    ports:
+      - "${MYSQL_HOST_PORT:-3309}:3306"
+    volumes:
+      - ./mysql-init.sql:/docker-entrypoint-initdb.d/mysql-init.sql:ro
+      - curbside_nodejs_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p\"$$MYSQL_ROOT_PASSWORD\" || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  curbside_nodejs_postgres_data:
+  curbside_nodejs_mysql_data:

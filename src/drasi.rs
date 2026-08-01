@@ -479,76 +479,61 @@ impl Drasi {
         filename: String,
         options: Option<Value>,
     ) -> napi::Result<Value> {
-        use drasi_host_sdk::registry::{
-            CosignVerifier, OciRegistryClient, RegistryConfig, TrustedIdentity, VerificationConfig,
-        };
+        let (path, verification) =
+            download_and_verify(&reference, &dest_dir, &filename, options.as_ref()).await?;
+        Ok(serde_json::json!({ "path": path, "verification": verification }))
+    }
 
-        // Parse opt-in verification options. `requireSigned` implies verification.
-        let opts = options.as_ref();
-        let require_signed = opts
-            .and_then(|o| o.get("requireSigned"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let verify = require_signed
-            || opts
-                .and_then(|o| o.get("verify"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-        let trusted_identities: Vec<TrustedIdentity> = opts
-            .and_then(|o| o.get("trustedIdentities"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|t| {
-                        let issuer = t.get("issuer").and_then(|v| v.as_str())?;
-                        let subject = t.get("subjectPattern").and_then(|v| v.as_str())?;
-                        Some(TrustedIdentity {
-                            issuer: issuer.to_string(),
-                            subject_pattern: subject.to_string(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+    /// Resolve a (possibly tag-less) plugin `reference` to the specific artifact
+    /// for this host — without downloading it.
+    ///
+    /// This is the platform- and version-aware resolution `drasi-server`'s
+    /// auto-install uses: given a bare ref like `"source/postgres"` (the default
+    /// registry `ghcr.io/drasi-project` is assumed), it selects the OCI tag for
+    /// the build target, verifies the plugin's SDK/core/lib versions are
+    /// compatible with the versions this addon was built against, and returns a
+    /// digest-pinned reference plus the exact `filename` to save the cdylib as
+    /// (so `loadPlugins` discovers it). Rejects incompatible or missing builds
+    /// with a typed error. Pass the result's `reference` + `filename` to
+    /// `pullPlugin`, or use `installPlugin` to do both in one call.
+    #[napi(ts_args_type = "reference: string", ts_return_type = "Promise<ResolvedPlugin>")]
+    pub async fn resolve_plugin(&self, reference: String) -> napi::Result<Value> {
+        Ok(resolved_plugin_to_json(&resolve_for_host(&reference).await?))
+    }
 
-        let config = VerificationConfig {
-            enabled: verify,
-            trusted_identities,
-        };
-        // The effective allowlist (falls back to the drasi-project identity when
-        // the caller configures none) — enforced by the binding since the SDK's
-        // `Verified` status does not itself check the signer against any allowlist.
-        let effective_identities = config.effective_identities();
-        let verifier = CosignVerifier::new(config);
-        let client = OciRegistryClient::with_verifier(RegistryConfig::default(), verifier);
-        let result = client
-            .download_plugin(&reference, std::path::Path::new(&dest_dir), &filename)
-            .await
-            .map_err(to_napi)?;
-
-        // Enforce the verification policy when verification is enabled: a tampered,
-        // untrusted-signer (or, with requireSigned, unsigned) artifact is deleted
-        // and rejected.
-        if verify {
-            if let Err(reason) =
-                verification_decision(&result.verification, require_signed, &effective_identities)
-            {
-                // Best-effort removal of the rejected artifact; if it fails, tell the
-                // caller so they don't assume a rejected file was cleaned up.
-                let reason = match tokio::fs::remove_file(&result.path).await {
-                    Ok(()) => reason,
-                    Err(e) => format!(
-                        "{reason} (warning: failed to remove the downloaded artifact at {}: {e})",
-                        result.path.display()
-                    ),
-                };
-                return Err(coded_message(DrasiErrorCode::PluginSignatureInvalid, reason));
-            }
-        }
-
+    /// Resolve `reference` for this host and download the resulting artifact into
+    /// `destDir` in one call — the high-level counterpart to `pullPlugin`.
+    ///
+    /// Unlike `pullPlugin` (which needs an exact platform-tagged reference and
+    /// filename), this accepts a bare ref like `"source/postgres"`, resolves it
+    /// with [`resolvePlugin`](Self::resolve_plugin) (platform + version
+    /// compatibility), downloads the compatible artifact under the resolver's
+    /// derived filename, applies the same opt-in cosign verification as
+    /// `pullPlugin`, and returns `{ path, resolved, verification }`. After it
+    /// resolves, call `loadPlugins(destDir)` (or `watchPlugins`) to register the
+    /// plugin.
+    #[napi(
+        ts_args_type = "reference: string, destDir: string, options?: PullPluginOptions",
+        ts_return_type = "Promise<InstallPluginResult>"
+    )]
+    pub async fn install_plugin(
+        &self,
+        reference: String,
+        dest_dir: String,
+        options: Option<Value>,
+    ) -> napi::Result<Value> {
+        let resolved = resolve_for_host(&reference).await?;
+        let (path, verification) = download_and_verify(
+            &resolved.reference,
+            &dest_dir,
+            &resolved.filename,
+            options.as_ref(),
+        )
+        .await?;
         Ok(serde_json::json!({
-            "path": result.path.to_string_lossy().to_string(),
-            "verification": verification_to_json(&result.verification),
+            "path": path,
+            "resolved": resolved_plugin_to_json(&resolved),
+            "verification": verification,
         }))
     }
 
@@ -1815,6 +1800,139 @@ fn parse_query_sources(sources: Vec<Value>) -> Result<Vec<ParsedSource>, CodedRe
         }
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Plugin resolution helpers (shared by pullPlugin / resolvePlugin /
+// installPlugin).
+// ---------------------------------------------------------------------------
+
+/// The Drasi crate versions this addon was built against, plus the build target
+/// triple. The plugin resolver uses these to select a compatible plugin
+/// artifact. Values are captured at build time (see `build.rs`).
+fn host_version_info() -> drasi_host_sdk::registry::HostVersionInfo {
+    drasi_host_sdk::registry::HostVersionInfo {
+        sdk_version: env!("DRASI_SDK_VERSION").to_string(),
+        core_version: env!("DRASI_CORE_VERSION").to_string(),
+        lib_version: env!("DRASI_LIB_VERSION").to_string(),
+        target_triple: env!("DRASI_TARGET_TRIPLE").to_string(),
+    }
+}
+
+/// Resolve a (possibly tag-less) plugin `reference` to the specific,
+/// version-compatible artifact for this host and platform.
+async fn resolve_for_host(
+    reference: &str,
+) -> napi::Result<drasi_host_sdk::registry::ResolvedPlugin> {
+    use drasi_host_sdk::registry::{OciRegistryClient, PluginResolver, RegistryConfig};
+    let config = RegistryConfig::default();
+    let default_registry = config.default_registry.clone();
+    let client = OciRegistryClient::new(config);
+    let host_info = host_version_info();
+    let resolver = PluginResolver::new(&client, &host_info);
+    resolver
+        .resolve(reference, &default_registry)
+        .await
+        .map_err(to_napi)
+}
+
+/// Shape a resolved plugin as the camelCase `ResolvedPlugin` TS object.
+fn resolved_plugin_to_json(p: &drasi_host_sdk::registry::ResolvedPlugin) -> Value {
+    serde_json::json!({
+        "reference": p.reference,
+        "version": p.version,
+        "sdkVersion": p.sdk_version,
+        "coreVersion": p.core_version,
+        "libVersion": p.lib_version,
+        "platform": p.platform,
+        "digest": p.digest,
+        "filename": p.filename,
+    })
+}
+
+/// Download `reference` into `dest_dir` as `filename`, applying the same opt-in
+/// cosign verification policy as `pullPlugin`. Returns `(path, verificationJson)`.
+///
+/// `options` is the parsed `PullPluginOptions` object (`verify`, `requireSigned`,
+/// `trustedIdentities`). When verification is enabled, a tampered / untrusted
+/// (or, with `requireSigned`, unsigned) artifact is deleted and rejected with a
+/// typed `PLUGIN_SIGNATURE_INVALID` error.
+async fn download_and_verify(
+    reference: &str,
+    dest_dir: &str,
+    filename: &str,
+    options: Option<&Value>,
+) -> napi::Result<(String, Value)> {
+    use drasi_host_sdk::registry::{
+        CosignVerifier, OciRegistryClient, RegistryConfig, TrustedIdentity, VerificationConfig,
+    };
+
+    // Parse opt-in verification options. `requireSigned` implies verification.
+    let require_signed = options
+        .and_then(|o| o.get("requireSigned"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let verify = require_signed
+        || options
+            .and_then(|o| o.get("verify"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    let trusted_identities: Vec<TrustedIdentity> = options
+        .and_then(|o| o.get("trustedIdentities"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let issuer = t.get("issuer").and_then(|v| v.as_str())?;
+                    let subject = t.get("subjectPattern").and_then(|v| v.as_str())?;
+                    Some(TrustedIdentity {
+                        issuer: issuer.to_string(),
+                        subject_pattern: subject.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let config = VerificationConfig {
+        enabled: verify,
+        trusted_identities,
+    };
+    // The effective allowlist (falls back to the drasi-project identity when the
+    // caller configures none) — enforced by the binding since the SDK's
+    // `Verified` status does not itself check the signer against any allowlist.
+    let effective_identities = config.effective_identities();
+    let verifier = CosignVerifier::new(config);
+    let client = OciRegistryClient::with_verifier(RegistryConfig::default(), verifier);
+    let result = client
+        .download_plugin(reference, std::path::Path::new(dest_dir), filename)
+        .await
+        .map_err(to_napi)?;
+
+    // Enforce the verification policy when verification is enabled: a tampered,
+    // untrusted-signer (or, with requireSigned, unsigned) artifact is deleted
+    // and rejected.
+    if verify {
+        if let Err(reason) =
+            verification_decision(&result.verification, require_signed, &effective_identities)
+        {
+            // Best-effort removal of the rejected artifact; if it fails, tell the
+            // caller so they don't assume a rejected file was cleaned up.
+            let reason = match tokio::fs::remove_file(&result.path).await {
+                Ok(()) => reason,
+                Err(e) => format!(
+                    "{reason} (warning: failed to remove the downloaded artifact at {}: {e})",
+                    result.path.display()
+                ),
+            };
+            return Err(coded_message(DrasiErrorCode::PluginSignatureInvalid, reason));
+        }
+    }
+
+    Ok((
+        result.path.to_string_lossy().to_string(),
+        verification_to_json(&result.verification),
+    ))
 }
 
 /// Parse the optional query `middleware` argument: an array of

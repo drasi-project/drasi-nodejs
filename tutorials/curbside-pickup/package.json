@@ -1,0 +1,23 @@
+{
+  "name": "curbside-pickup-tutorial",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Curbside Pickup tutorial for @drasi/lib: real-time pickup coordination over PostgreSQL (orders) and MySQL (vehicles), with a cross-source join and a temporal delay query, streamed to one integrated UI by the SSE reaction.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "db:up": "docker compose -f database/docker-compose.yml up -d --wait",
+    "db:down": "docker compose -f database/docker-compose.yml down -v",
+    "demo": "npm run db:up && npm start"
+  },
+  "dependencies": {
+    "@drasi/lib": "^0.2.2",
+    "express": "^4.21.2",
+    "mysql2": "^3.11.5",
+    "pg": "^8.13.1"
+  }
+}

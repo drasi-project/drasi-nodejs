@@ -12,11 +12,13 @@ on:
     branches: [main]
     paths:
       - "website/**"
+      - "tutorials/**/_index.md"
       - ".github/workflows/website.yml"
   pull_request:
     branches: [main]
     paths:
       - "website/**"
+      - "tutorials/**/_index.md"
       - ".github/workflows/website.yml"
 
 # Allow the deploy job to publish to GitHub Pages via OIDC.

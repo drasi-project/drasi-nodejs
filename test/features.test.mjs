@@ -436,6 +436,36 @@ test('OCI: pull a plugin artifact to disk', { skip: ociSkip }, async () => {
   await d.close();
 });
 
+test('OCI: resolvePlugin resolves a bare ref for this host', { skip: ociSkip }, async () => {
+  const d = await Drasi.create('t-oci-resolve');
+  // No tag, no platform suffix, no filename — the resolver does all of that.
+  const r = await d.resolvePlugin('source/postgres');
+  assert.ok(r.reference.includes('@sha256:'), 'reference is pinned by digest');
+  assert.match(r.version, /^\d+\.\d+/, 'a concrete version was chosen');
+  const ext = process.platform === 'win32' ? 'dll' : process.platform === 'darwin' ? 'dylib' : 'so';
+  const prefix = process.platform === 'win32' ? '' : 'lib';
+  assert.equal(r.filename, `${prefix}drasi_source_postgres.${ext}`, 'derives the platform filename');
+  // The resolved artifact is compatible with the versions this addon was built against.
+  assert.ok(r.sdkVersion && r.coreVersion && r.libVersion, 'reports the compatible SDK/core/lib versions');
+  await d.close();
+});
+
+test('OCI: installPlugin resolves + downloads a loadable plugin', { skip: ociSkip }, async () => {
+  const d = await Drasi.create('t-oci-install');
+  const dest = mkdtempSync(join(tmpdir(), 'drasi-install-'));
+
+  // One call: resolve for this host/platform, download under the derived name.
+  const result = await d.installPlugin('source/postgres', dest);
+  assert.ok(existsSync(result.path), `downloaded plugin exists at ${result.path}`);
+  assert.equal(result.resolved.filename, result.path.split('/').pop(), 'saved under the resolved filename');
+  assert.equal(result.verification.status, 'unsigned', 'no verification requested');
+
+  // The downloaded artifact registers its kind when loaded.
+  await d.loadPlugins(dest);
+  assert.ok(d.pluginKinds().sources.includes('postgres'), 'installed source kind is registered');
+  await d.close();
+});
+
 test('getSourceSchema reports a source graph schema', async () => {
   const d = await Drasi.create('t-src-schema');
   await d.loadPlugins(pluginsDir);
