@@ -148,6 +148,8 @@ once it's ready.
 
 You'll see the **Curbside Pickup** UI, a single page with everything on it:
 
+![The Curbside Pickup UI: an Orders panel (Retail Ops · PostgreSQL) and a Vehicles panel (Physical Ops · MySQL) on the left, empty Matched Orders and Delayed Orders panels on the right, and an empty SQL Log along the bottom.](images/ui-overview.png)
+
 - 🍕 **Orders** *(Retail Ops · PostgreSQL)* — every order, each with a badge (*preparing* /
   *ready*) and a button that toggles it. This is both a live panel **and** the control for the
   retail side.
@@ -161,63 +163,52 @@ You'll see the **Curbside Pickup** UI, a single page with everything on it:
   log prints each statement, colour-coded by database, so you can see exactly what Drasi is
   reacting to.
 
+The two left-hand panels are what you drive — each row is one operational record with its
+current state and a single toggle button:
+
+![Close-up of the two control panels: three orders (each preparing, with a Mark ready button) and three vehicles (each Parking, with a To curbside button), tagged by their source database.](images/controls.png)
+
 At bootstrap all three orders are *preparing* and all three vehicles are *Parking*, so the
 **Matched** and **Delayed** panels start empty and fill in as you drive changes. Every panel
 updates the instant the data changes — no refreshing.
 
 ## Step 4 of 4: Drive Change
-With the app running and the UI open, change orders and vehicles and watch Drasi react. You can
-do this two ways: from the **UI's** buttons, or from **helper scripts** in a second terminal.
+With the app running and the UI open, change orders and vehicles from the UI and watch Drasi
+react.
 
 > **No middle tier — every change is just a database write**
 >
-> Whether you click a button in the UI or run a helper script, the only thing that happens is a
-> plain SQL `UPDATE` — against PostgreSQL for orders, MySQL for vehicles — exactly what the real
-> retail and physical-operations apps would do. The UI's buttons post to the app, which runs the
-> `UPDATE`; the scripts run it directly with `psql` / `mysql`. Either way there's **no event to
-> publish and no call into Drasi**. Drasi observes the row change through PostgreSQL's logical
-> replication and MySQL's binary log, re-evaluates the affected queries, and the SSE reaction
-> re-shapes and pushes the change on its own.
+> Every button in the UI does exactly one thing: a plain SQL `UPDATE` — against PostgreSQL for
+> orders, MySQL for vehicles — exactly what the real retail and physical-operations apps would
+> do. The button posts to the app, which runs the `UPDATE`; there's **no event to publish and no
+> call into Drasi**. Drasi observes the row change through PostgreSQL's logical replication and
+> MySQL's binary log, re-evaluates the affected queries, and the SSE reaction re-shapes and pushes
+> the change on its own. The **SQL Log** panel shows exactly which statement hit which database.
 
 ### Trigger a delivery
 
-In the 🍕 **Orders** panel, click **Mark ready** on order **1** (Sophia Carter, plate
-`A1234`). The SQL log shows:
+In the 🍕 **Orders** panel, click **Mark ready** on order **1** (Sophia Carter, plate `A1234`) —
+its badge flips to *ready*. Then, in the 🚗 **Vehicles** panel, click **To curbside** on vehicle
+**A1234** (Sophia's Blue Toyota Camry).
 
-```text
-[PostgreSQL] UPDATE orders SET status='ready' WHERE id=1;
-```
-
-The order's badge flips to *ready*. Now, in the 🚗 **Vehicles** panel, click **To curbside**
-on vehicle **A1234**:
-
-```text
-[MySQL] UPDATE vehicles SET location='Curbside' WHERE plate='A1234';
-```
-
-Within about a second the 📦 **Matched Orders** panel reacts: order **1** appears with its
+Within about a second the 📦 **Matched Orders** panel lights up: order **1** appears with its
 driver and vehicle. Nothing polled anything — Drasi saw the PostgreSQL change through logical
 replication and the MySQL change through the binary log, and re-evaluated the cross-database
-join. Move the vehicle back to *Parking* and the row disappears from **Matched Orders**: the
-order is no longer matched to a waiting driver.
+join. The **SQL Log** shows the two writes that drove it, one per database.
 
-The same thing from a second terminal:
+![After marking order 1 ready and moving vehicle A1234 to the curbside: the Matched Orders panel shows Order 1 with driver Elijah Brooks and the Blue Toyota Camry A1234, and the SQL Log shows an UPDATE against PostgreSQL (orders) and one against MySQL (vehicles).](images/trigger-delivery.png)
 
-```bash
-bash scripts/set-order.sh 1 ready
-bash scripts/move-vehicle.sh A1234 Curbside
-```
+Move the vehicle back to *Parking* (or mark the order *preparing*) and the row disappears from
+**Matched Orders** — the order is no longer matched to a waiting driver.
 
 ### Trigger a delay
 
-Now reproduce the *other* scenario. Pick a vehicle whose order is **not** ready — say **B5678**
-(Mason Rivera) — and move it to *Curbside*, but **leave order 2 as *preparing***. Nothing
-happens immediately. After **10 seconds** the ⚠️ **Delayed Orders** panel lights up: order **2**
-appears, flagging that the driver has been waiting too long.
+Now reproduce the *other* scenario. Click **To curbside** on vehicle **B5678** (Mason Rivera's
+Red Ford F-150), but **leave order 2 as *preparing***. Nothing happens immediately. After
+**10 seconds** the ⚠️ **Delayed Orders** panel lights up: order **2** appears, flagging that the
+driver has been waiting too long.
 
-```bash
-bash scripts/move-vehicle.sh B5678 Curbside
-```
+![After moving vehicle B5678 to the curbside while order 2 stays preparing: 10 seconds later the Delayed Orders panel shows Order 2, Mason Rivera, with the time they have been waiting since.](images/trigger-delay.png)
 
 This is the interesting one. Drasi doesn't poll to find slow orders — the **continuous query
 schedules its own future re-evaluation** for the moment the 10-second threshold is crossed, and
@@ -227,23 +218,36 @@ the 10 seconds elapse, the alert never appears.
 ### Reset
 
 Return everything to the starting state — all orders *preparing*, all vehicles *Parking* — with
-the **Reset** button in the header, or from a terminal:
+the **Reset** button in the header. The **Matched** and **Delayed** panels clear.
 
-```bash
-bash scripts/reset.sh
-```
-
-The **Matched** and **Delayed** panels clear.
+> **Prefer the terminal?**
+>
+> Because every change is just a database write, you can drive the same reactions with `psql` and
+> `mysql` from a second terminal — no app endpoint involved:
+>
+> ```bash
+> # Order (PostgreSQL / Retail Ops): mark order 1 ready
+> docker exec curbside-pickup-nodejs-postgres \
+>   psql -U drasi_user -d RetailOperations \
+>   -c "UPDATE orders SET status = 'ready' WHERE id = 1;"
+>
+> # Vehicle (MySQL / Physical Ops): move A1234 to the curbside
+> docker exec curbside-pickup-nodejs-mysql \
+>   mysql -u drasi_user -pdrasi_password PhysicalOperations \
+>   -e "UPDATE vehicles SET location = 'Curbside' WHERE plate = 'A1234';"
+> ```
+>
+> Watch **Matched Orders** react exactly as if you had clicked the buttons.
 
 ## How It Works
-Everything you just ran is a single Node app under `tutorials/curbside-pickup/`. Its
-`src/index.mjs` embeds the engine, builds the topology over both databases, wires the SSE
-reaction, and serves the UI. Here's what each part does.
+Everything you just ran is a single Node app under `tutorials/curbside-pickup/`. One file,
+`index.mjs`, embeds the engine, builds the topology over both databases, wires the SSE
+reaction, and serves the UI (the browser front end lives in `public/`). Here's what each part
+does.
 
 ### Two Sources
 
-The queries join data from two different databases, so the app declares two CDC sources
-(`src/engine.mjs`).
+The queries join data from two different databases, so the app declares two CDC sources:
 
 **PostgreSQL** holds the orders and streams changes via **logical replication (CDC)**:
 
@@ -285,7 +289,7 @@ become `vehicles` nodes, matching the `(o:orders)` and `(v:vehicles)` patterns i
 
 There is no foreign key between the two databases — they're completely separate systems. Drasi
 creates the relationship in the query with a **synthetic join**, matching a vehicle to an order
-whenever their `plate` values are equal (`queries.mjs`):
+whenever their `plate` values are equal:
 
 ```js
 const PICKUP_BY = {
@@ -377,7 +381,7 @@ RETURN
 > columns or application bookkeeping required.
 
 All six queries are registered the same way, each with the sources it reads and (for the join
-queries) the `PICKUP_BY` join (`src/engine.mjs`):
+queries) the `PICKUP_BY` join:
 
 ```js
 await engine.addQuery('delivery', deliveryCypher,
@@ -417,8 +421,9 @@ await engine.addReaction('sse', 'curbside-sse', Object.keys(routes), {
 ```
 
 `{{json ...}}` is one of the reaction's Handlebars helpers; it serializes each value as valid
-JSON. The templates and the query-to-path mapping live in one place, `src/streams.mjs`, which
-generates both the reaction config above and a matching reshaper for the initial snapshot.
+JSON. In the code, a small `sseRoute(path, shape)` helper turns each query's row *shape* into
+those templates, and the same shapes drive a matching reshaper for the initial snapshot — so the
+browser sees an identical payload whether it arrives as a live change or in the seed.
 
 Because SSE only carries **changes from the moment a client connects**, the app also serves the
 current state once at `GET /api/state` (built from `getQueryResults`, shaped through the same
@@ -427,8 +432,8 @@ contract). The browser seeds from that snapshot, then applies live deltas.
 Finally, the SSE reaction serves each query on its own route. Rather than have the browser open
 one `EventSource` per route — which, with the browser's ~6-connections-per-host HTTP/1.1 limit,
 would eat into the connections the control `fetch()`es need — the app opens all of those routes
-itself and **multiplexes** them into a **single** same-origin stream at `GET /events`
-(`src/index.mjs`). Each forwarded event is tagged with its stream path
+itself and **multiplexes** them into a **single** same-origin stream at `GET /events`.
+Each forwarded event is tagged with its stream path
 (`{ "path": …, "msg": { op, row } }`). Node has no such per-host limit, and only one port needs
 forwarding in Codespaces or a dev container.
 
@@ -477,8 +482,8 @@ The vehicle row follows the same shape (its button carries `data-vehicle`), whil
 **Matched** and **Delayed** rows are read-only variants with no button — the delayed row, for
 example, just shows the order and how long the driver has been waiting. The order and vehicle
 toggle buttons post to the app's small control
-endpoints (`POST /api/orders/:id/toggle`, `POST /api/vehicles/:plate/toggle`, `POST /api/reset`)
-in `src/db.mjs`, which run plain `UPDATE` statements against PostgreSQL and MySQL and record
+endpoints (`POST /api/orders/:id/toggle`, `POST /api/vehicles/:plate/toggle`, `POST /api/reset`),
+which run plain `UPDATE` statements against PostgreSQL and MySQL and record
 each one in the SQL log the page shows. So a click becomes a database change that Drasi observes
 through CDC, re-runs the affected queries, and the SSE reaction pushes the shaped change back to
 the browser — closing the loop, all on the same page.
@@ -509,5 +514,5 @@ bash scripts/cleanup.sh --volumes
   CDC) and shows them live, so the whole "two independent systems, one live view" story fits on
   a single page.
 
-From here, try changing the delay threshold in `queries.mjs`, editing the Handlebars templates
-in `src/streams.mjs`, adding another cross-source query, or pointing the app at your own data.
+From here, try changing the delay threshold, editing the Handlebars templates, adding another
+cross-source query, or pointing the app at your own data — it's all in one file, `index.mjs`.

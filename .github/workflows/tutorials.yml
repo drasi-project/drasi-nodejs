@@ -96,40 +96,48 @@ jobs:
           node-version: "22"
       # This tutorial uses @drasi/lib's installPlugin API (>= 0.2.2). Until that
       # release is published, `npm install` can't resolve the pinned version, so
-      # the smoke test validates the app statically (streams.mjs is dependency-free).
-      # A full run needs Docker + the databases and is exercised in the dev container.
-      - name: Syntax-check all modules
-        run: node --check src/index.mjs && for f in src/*.mjs queries.mjs; do node --check "$f"; done
-      - name: SSE stream contract is consistent
+      # the smoke test validates the single-file app statically. A full run needs
+      # Docker + the databases and is exercised in the dev container.
+      - name: Syntax-check the app
+        run: node --check index.mjs
+      - name: Topology + SSE contract is consistent
         run: |
           node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
             import assert from 'node:assert';
-            import { STREAMS, buildSseRoutes, reshapeRow } from './src/streams.mjs';
+            const src = readFileSync('index.mjs', 'utf8');
 
-            // Every stream generates added/updated/deleted Handlebars routes,
-            // and the reshaper mirrors the templates' field contract.
-            const routes = buildSseRoutes();
-            for (const s of STREAMS) {
-              const r = routes[s.query];
-              assert.ok(r && r.added && r.updated && r.deleted, s.query + ' has all change routes');
-              assert.equal(r.added.path, '/' + s.path);
-              assert.ok(r.added.template.includes('\"op\":\"add\"'));
-              assert.ok(r.deleted.template.includes('before.'), 'delete reads before');
-              // Templates reference each contract column via the json helper.
-              for (const col of Object.values(s.fields)) {
-                assert.ok(r.added.template.includes('after.' + col), 'template shapes ' + col);
-              }
+            // Six queries, each its own addQuery call, in order.
+            const ids = [...src.matchAll(/addQuery\('([^']+)'/g)].map((m) => m[1]);
+            assert.deepEqual(ids, [
+              'orders-preparing', 'orders-ready', 'vehicles-parking', 'vehicles-curbside',
+              'delivery', 'delay',
+            ], 'six queries in order');
+
+            // The cross-source join + temporal query.
+            assert.ok(src.includes(\"id: 'PICKUP_BY'\"), 'declares the PICKUP_BY join');
+            assert.ok(/\(o:orders\)-\[:PICKUP_BY\]->\(v:vehicles\)/.test(src), 'join traverses PICKUP_BY');
+            assert.ok(src.includes('drasi.trueFor'), 'delay uses drasi.trueFor');
+            // retail-ops (PostgreSQL) is listed first in both joins (drasi-core#682).
+            assert.ok(!/\['physical-ops', 'retail-ops'\]/.test(src), 'joins list retail-ops first');
+
+            // The SSE reaction routes all six queries to their UI paths.
+            for (const [q, path] of [
+              ['orders-preparing', 'orders-preparing'],
+              ['orders-ready', 'orders-ready'],
+              ['vehicles-parking', 'vehicles-parking'],
+              ['vehicles-curbside', 'vehicles-curbside'],
+              ['delivery', 'delivery'],
+              ['delay', 'delay'],
+            ]) {
+              assert.ok(new RegExp(\"'\" + q + \"':\\\\s*sseRoute\\\\('\" + path + \"'\").test(src), q + ' -> /' + path);
             }
+            // The delay stream's merge id is derived from orderId (no 'id' column).
+            assert.ok(/DELAY_SHAPE = \{[^}]*id: 'orderId'/.test(src), 'delay id maps from orderId');
 
-            // The delay stream's merge key is derived from orderId (the query has
-            // no 'id' column), so the reshaper maps both from the same source.
-            const delay = STREAMS.find((s) => s.path === 'delay');
-            const shaped = reshapeRow(delay.fields, { orderId: 7, customerName: 'Ava', waitingSinceTimestamp: '2025-01-01T00:00:00Z' });
-            assert.equal(shaped.id, 7);
-            assert.equal(shaped.orderId, 7);
-            assert.equal(shaped.customerName, 'Ava');
-            assert.equal(shaped.waitingSince, '2025-01-01T00:00:00Z');
-            console.log('✅ SSE stream contract ok');
+            // /api/state reshapes every stream for the initial snapshot.
+            assert.ok((src.match(/reshape\(/g) || []).length >= 6, '/api/state reshapes every stream');
+            console.log('✅ topology + SSE contract ok');
           "
 
   getting-started:
