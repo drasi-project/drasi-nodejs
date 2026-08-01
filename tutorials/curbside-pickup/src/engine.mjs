@@ -6,7 +6,8 @@
 //                                        └→ SSE reaction (Handlebars routes)
 
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConnection } from 'node:net';
 import { QUERIES } from '../queries.mjs';
@@ -89,8 +90,10 @@ async function waitForPort(host, port, label, attempts = 90) {
  * the SSE reaction, and return the running engine.
  */
 export async function createEngine(ensurePlugins) {
-  const pluginsDir = join(process.cwd(), '.drasi-plugins', `${process.platform}-${process.arch}`);
-  if (!existsSync(pluginsDir)) mkdirSync(pluginsDir, { recursive: true });
+  // Download plugins into a fresh temp directory each run. installPlugin fetches
+  // the build for this platform, so there's no arch handling or shared-folder
+  // ambiguity to manage.
+  const pluginsDir = mkdtempSync(join(tmpdir(), 'drasi-plugins-'));
 
   const engine = await Drasi.create('curbside-pickup', {});
   await ensurePlugins(engine, pluginsDir);

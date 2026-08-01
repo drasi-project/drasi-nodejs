@@ -4,7 +4,8 @@
 //   ->  SSE reaction (shapes changes with Handlebars, streams them over SSE)
 
 import { createRequire } from 'node:module';
-import { existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createConnection } from 'node:net';
 import { QUERIES, SOURCE_ID } from '../queries.mjs';
@@ -66,13 +67,10 @@ async function waitForPort(host, port, attempts = 60) {
  * this module stays focused on topology.
  */
 export async function createEngine(ensurePlugins) {
-  // Cache plugins in a platform-specific subdirectory. The tutorial folder is
-  // often mounted into a dev container, so a Linux (.so) and a macOS (.dylib)
-  // build of the same plugin can otherwise land in one directory — which the
-  // plugin loader rejects as ambiguous. Keying by platform+arch keeps each
-  // host's binaries separate.
-  const pluginsDir = join(process.cwd(), '.drasi-plugins', `${process.platform}-${process.arch}`);
-  if (!existsSync(pluginsDir)) mkdirSync(pluginsDir, { recursive: true });
+  // Download plugins into a fresh temp directory each run. installPlugin fetches
+  // the build for this platform, so there's no arch handling or shared-folder
+  // ambiguity to manage.
+  const pluginsDir = mkdtempSync(join(tmpdir(), 'drasi-plugins-'));
 
   const engine = await Drasi.create('building-comfort', {});
 

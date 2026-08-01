@@ -130,9 +130,10 @@ and nine rooms — every room comfortable to begin with) and then runs the Node 
 foreground.
 
 On first start, the app downloads the Drasi plugins it needs (`source/postgres`,
-`bootstrap/postgres`, and `reaction/sse`) from `ghcr.io/drasi-project` and caches them under
-`.drasi-plugins/`, connects to the database, and starts the six continuous queries and
-the SSE reaction. When you see this line, it's ready:
+`bootstrap/postgres`, and `reaction/sse`) from `ghcr.io/drasi-project` with `installPlugin`, which
+resolves each one to the build that matches your platform **and** this library version, connects to
+the database, and starts the six continuous queries and the SSE reaction. When you see this line,
+it's ready:
 
 ```text
 ✅ Building Comfort is ready — open http://localhost:3000

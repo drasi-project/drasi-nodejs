@@ -115,9 +115,9 @@ privileges the source needs.
 
 On first start, the app downloads the Drasi plugins it needs (`source/postgres`,
 `bootstrap/postgres`, `source/mysql`, `bootstrap/mysql`, and `reaction/sse`) from
-`ghcr.io/drasi-project` and caches them under `.drasi-plugins/`, connects to both databases,
-bootstraps the existing rows, and starts the six continuous queries and the SSE reaction. When
-you see this line, it's ready:
+`ghcr.io/drasi-project` with `installPlugin`, which resolves each one to the build that matches your
+platform **and** this library version, connects to both databases, bootstraps the existing rows, and
+starts the six continuous queries and the SSE reaction. When you see this line, it's ready:
 
 ```text
 ✅ Curbside Pickup is ready — open http://localhost:3000

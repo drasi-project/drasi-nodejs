@@ -41,8 +41,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Install dependencies
-        run: npm install
+      # This tutorial uses @drasi/lib's installPlugin API (>= 0.2.2). Until that
+      # release is published, `npm install` can't resolve the pinned version, so
+      # the smoke test validates the app statically (streams.mjs is dependency-free).
+      # A full run needs Docker + PostgreSQL and is exercised in the dev container.
       - name: Syntax-check all modules
         run: node --check src/index.mjs && for f in src/*.mjs queries.mjs; do node --check "$f"; done
       - name: SSE stream contract is consistent
@@ -86,8 +88,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Install dependencies
-        run: npm install
+      # This tutorial uses @drasi/lib's installPlugin API (>= 0.2.2). Until that
+      # release is published, `npm install` can't resolve the pinned version, so
+      # the smoke test validates the app statically (streams.mjs is dependency-free).
+      # A full run needs Docker + the databases and is exercised in the dev container.
       - name: Syntax-check all modules
         run: node --check src/index.mjs && for f in src/*.mjs queries.mjs; do node --check "$f"; done
       - name: SSE stream contract is consistent

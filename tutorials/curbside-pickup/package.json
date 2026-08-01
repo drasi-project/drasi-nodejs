@@ -15,7 +15,7 @@
     "demo": "npm run db:up && npm start"
   },
   "dependencies": {
-    "@drasi/lib": "^0.2.0",
+    "@drasi/lib": "^0.2.2",
     "express": "^4.21.2",
     "mysql2": "^3.11.5",
     "pg": "^8.13.1"
