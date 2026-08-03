@@ -11,7 +11,6 @@ import { join } from 'node:path';
 import { createConnection } from 'node:net';
 import type { QueryResultEvent, StreamEnvelope } from '../shared/types.js';
 import { QUERIES, SOURCE_POSTGRES, SOURCE_PRICES } from '../shared/queries.js';
-import { ensurePlugins } from './plugins.js';
 import { PriceFeed } from './price-feed.js';
 
 const require = createRequire(import.meta.url);
@@ -36,6 +35,9 @@ const PG_CONFIG = {
     { table: 'watchlist', keyColumns: ['id'] },
   ],
 };
+
+/** Plugins this demo needs (bare OCI refs; installPlugin picks platform/version). */
+const REQUIRED_PLUGINS = ['source/postgres', 'bootstrap/postgres'] as const;
 
 let engine: Engine | null = null;
 let priceFeed: PriceFeed | null = null;
@@ -79,7 +81,7 @@ async function waitForPort(host: string, port: number, attempts = 60): Promise<v
   );
 }
 
-/** Create the engine, download plugins, and build the full topology. */
+/** Create the engine, install plugins, and build the full topology. */
 export async function initEngine(): Promise<void> {
   if (engine) return;
 
@@ -88,8 +90,23 @@ export async function initEngine(): Promise<void> {
 
   engine = await Drasi.create('trading', {});
 
-  // Plugins are installed via bare refs (installPlugin) at startup, never baked in.
-  await ensurePlugins(engine, pluginsDir);
+  // Install required plugins via bare refs (never baked in). Skip download when
+  // a previous launch already cached compatible binaries under userData.
+  await engine.loadPlugins(pluginsDir);
+  const kinds = engine.pluginKinds();
+  let installed = false;
+  for (const ref of REQUIRED_PLUGINS) {
+    const [type, kind] = ref.split('/') as [string, string];
+    const present =
+      (type === 'source' && kinds.sources.includes(kind)) ||
+      (type === 'bootstrap' && kinds.bootstrap.includes(kind));
+    if (present) continue;
+    console.log(`[plugins] installing ${ref}`);
+    await engine.installPlugin(ref, pluginsDir);
+    installed = true;
+  }
+  if (installed) await engine.loadPlugins(pluginsDir);
+
   await engine.start();
 
   // Real Postgres CDC source (+ postgres bootstrap for the initial snapshot).
