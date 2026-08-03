@@ -29,9 +29,11 @@ The full source is in
 - **Application reactions** — one [`addJsReaction`](../../api/#addjsreactionid-queryids-callback)
   per query streams result diffs straight to the renderer over a single IPC channel;
   the dashboard merges ADD/UPDATE/DELETE/aggregation diffs into live tables.
-- **Plugins downloaded at runtime** — the Postgres source and bootstrap plugins are
-  pulled from `ghcr.io/drasi-project` on first launch and cached locally. Nothing is
-  baked in. See [Working with plugins](../../guides/plugins/).
+- **Plugins installed at runtime** — the Postgres source and bootstrap plugins are
+  installed via bare refs (`installPlugin('source/postgres')`, …) from
+  `ghcr.io/drasi-project` on first launch and cached locally. The engine picks the
+  platform-compatible artifact; nothing is baked in. See
+  [Working with plugins](../../guides/plugins/).
 
 ## Architecture
 
@@ -43,7 +45,7 @@ flowchart LR
     T3[watchlist]
   end
   subgraph main[Electron main - embeds @drasi/lib]
-    PS[postgres source<br/>downloaded OCI]
+    PS[postgres source<br/>installPlugin]
     PF[price-feed<br/>JS source]
     Q[5 continuous queries<br/>+ synthetic joins]
     RX[addJsReaction]

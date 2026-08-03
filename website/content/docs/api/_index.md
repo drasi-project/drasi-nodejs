@@ -6,7 +6,7 @@ description: >
   Every method on the Drasi class, grouped by area, with parameters and return types.
 ---
 
-The public API is the `Drasi` class exported from `@drasi/lib`. There are **42
+The public API is the `Drasi` class exported from `@drasi/lib`. There are **44
 methods across 8 areas**. Every method except `pluginKinds()`, `sourceConfigSchema()`,
 `reactionConfigSchema()`, and `bootstrapConfigSchema()` is `async` (returns a
 `Promise`).
@@ -24,7 +24,7 @@ import { Drasi } from '@drasi/lib';
 | Area | Methods |
 | --- | --- |
 | Construction | `create`¹, `fromConfig`¹ |
-| Plugins | `loadPlugins`, `watchPlugins`, `listPluginTags`, `pullPlugin`, `sourceConfigSchema`², `reactionConfigSchema`², `bootstrapConfigSchema`², `pluginKinds`² |
+| Plugins | `loadPlugins`, `watchPlugins`, `resolvePlugin`, `installPlugin`, `listPluginTags`, `pullPlugin`, `sourceConfigSchema`², `reactionConfigSchema`², `bootstrapConfigSchema`², `pluginKinds`² |
 | Sources | `addSource`, `addJsSource`, `pushChange`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources` |
 | Queries | `addQuery`, `updateQuery`, `startQuery`, `stopQuery`, `getQueryResults`, `removeQuery`, `listQueries` |
 | Reactions | `addReaction`, `addJsReaction`, `addDurableJsReaction`, `updateReaction`, `startReaction`, `stopReaction`, `removeReaction`, `listReactions` |
@@ -107,14 +107,38 @@ descriptors so their `kind`s become usable by `addSource`/`addReaction`.
 Watch `dir` and hot-(re)load plugins as files are added or changed (1s debounce).
 Removed files deregister their kinds. Reload failures are logged, not thrown.
 
+### resolvePlugin(reference) → Promise&lt;ResolvedPlugin&gt; {#resolvepluginreference}
+
+Resolve a (possibly tag-less) plugin `reference` to the specific artifact for this
+host **without downloading it**. Given a bare ref like `"source/postgres"` (default
+registry `ghcr.io/drasi-project`), selects the OCI tag for the build target, checks
+SDK/core/lib version compatibility, and returns a digest-pinned reference plus the
+cdylib `filename` `loadPlugins` expects.
+
+**Returns** `{ reference, version, sdkVersion, coreVersion, libVersion, platform, digest, filename }`.
+
+### installPlugin(reference, destDir, options?) → Promise&lt;InstallPluginResult&gt; {#installpluginreference-destdir-options}
+
+Resolve `reference` for this host and download the artifact into `destDir` in one
+call — the high-level counterpart to `pullPlugin`. Accepts a bare ref like
+`"source/postgres"` (or a version pin like `"source/postgres:0.1.13"`); platform
+tag, filename, and compatibility checks are handled for you. Supports the same
+opt-in cosign `options` as `pullPlugin`.
+
+**Returns** `{ path, resolved, verification }`. After a successful install, call
+`loadPlugins(destDir)` (or `watchPlugins`) to register it.
+
 ### listPluginTags(repository) → Promise&lt;string[]&gt; {#listplugintagsrepository}
 
 List available tags for a plugin repo in the configured OCI registry (default
-`ghcr.io/drasi-project`), e.g. `listPluginTags("source/postgres")`.
+`ghcr.io/drasi-project`), e.g. `listPluginTags("source/postgres")`. Low-level —
+prefer `resolvePlugin` / `installPlugin` for installs.
 
 ### pullPlugin(reference, destDir, filename, options?) → Promise&lt;{ path, verification }&gt; {#pullpluginreference-destdir-filename-options}
 
-Download a plugin artifact from an OCI registry to `destDir/filename`.
+Download a plugin artifact from an OCI registry to `destDir/filename`. Low-level —
+prefer `installPlugin` unless you already have an exact platform-tagged reference
+and filename.
 
 - `reference: string` — full OCI reference, e.g.
   `ghcr.io/drasi-project/source/postgres:0.1.13-windows-msvc-amd64`.

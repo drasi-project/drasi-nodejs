@@ -59,33 +59,36 @@ await drasi.loadPlugins('./plugins', {
 hot-(re)loads plugins as files are added or changed (1s debounce). Removed files
 deregister their kinds.
 
-## Pull plugins from an OCI registry
+## Install plugins from an OCI registry
 
-You don't have to ship plugin binaries yourself — pull them at runtime from the
-public `ghcr.io/drasi-project` OCI registry.
+You don't have to ship plugin binaries yourself — install them at runtime from the
+public `ghcr.io/drasi-project` OCI registry. Prefer the high-level
+[`installPlugin`](../../api/#installpluginreference-destdir-options) API: pass a
+**bare repository ref** and the engine resolves the latest build that is compatible
+with this addon's platform and SDK/core/lib versions (the same resolver
+`drasi-server` uses for auto-install).
 
 ```js
-// Discover available versions...
-const tags = await drasi.listPluginTags('source/postgres');
+// Bare refs — no version tags, architecture suffixes, or filenames to work out.
+await drasi.installPlugin('source/postgres', './plugins');
+await drasi.installPlugin('bootstrap/postgres', './plugins');
 
-// ...then download one to a local directory.
-const { path, verification } = await drasi.pullPlugin(
-  'ghcr.io/drasi-project/source/postgres:0.1.13-linux-glibc-amd64',
-  './plugins',
-  'libdrasi_source_postgres.so',
-);
-
-// Register what you pulled.
+// Register what you installed.
 await drasi.loadPlugins('./plugins');
 ```
 
+`installPlugin` returns `{ path, resolved, verification }`. `resolved` includes the
+digest-pinned reference, version, platform, and the cdylib `filename` that was
+written. You can also call [`resolvePlugin(reference)`](../../api/#resolvepluginreference)
+first if you only need resolution without downloading.
+
 ### Signature verification
 
-`pullPlugin` supports opt-in [cosign](https://docs.sigstore.dev/) signature
-enforcement via its `options` argument:
+`installPlugin` (and the lower-level `pullPlugin`) support opt-in
+[cosign](https://docs.sigstore.dev/) signature enforcement via an `options` argument:
 
 ```js
-await drasi.pullPlugin(ref, './plugins', filename, {
+await drasi.installPlugin('source/postgres', './plugins', {
   verify: true,          // reject tampered / untrusted artifacts
   requireSigned: true,   // additionally reject unsigned artifacts
   trustedIdentities: [{ issuer: 'https://token.actions.githubusercontent.com',
@@ -96,6 +99,22 @@ await drasi.pullPlugin(ref, './plugins', filename, {
 The returned `verification` is `{ status: 'unsigned' | 'verified' | 'tampered', ... }`.
 When verification is enabled, a tampered — or valid-but-untrusted — artifact is
 deleted and the promise rejects.
+
+### Low-level pull (advanced)
+
+If you already know the exact platform-tagged OCI reference and filename, you can
+still use `listPluginTags` + `pullPlugin` directly. Most apps should prefer
+`installPlugin` instead.
+
+```js
+const tags = await drasi.listPluginTags('source/postgres');
+const { path, verification } = await drasi.pullPlugin(
+  'ghcr.io/drasi-project/source/postgres:0.1.13-linux-amd64',
+  './plugins',
+  'libdrasi_source_postgres.so',
+);
+await drasi.loadPlugins('./plugins');
+```
 
 ## Validate plugin config
 

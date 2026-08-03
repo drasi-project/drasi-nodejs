@@ -56,18 +56,28 @@ export interface DirectoryEntry {
   repository: string;
 }
 
-/** A resolvable, platform-matched version of a plugin. */
-export interface PluginVersion {
-  version: string;
-  /** Full platform-suffixed tag, e.g. "0.1.13-windows-msvc-amd64". */
-  tag: string;
-  /** Full OCI reference for pullPlugin. */
+/** Cosign verification outcome from installPlugin / pullPlugin. */
+export type PullPluginVerification =
+  | { status: 'unsigned' }
+  | { status: 'verified'; issuer?: string; subject?: string }
+  | { status: 'tampered'; reason?: string };
+
+/** How installPlugin resolved a bare repository ref for this host. */
+export interface ResolvedPlugin {
   reference: string;
+  version: string;
+  sdkVersion: string;
+  coreVersion: string;
+  libVersion: string;
+  platform: string;
+  digest: string;
+  filename: string;
 }
 
 export interface InstallResult {
   path: string;
-  verification: string;
+  resolved: ResolvedPlugin;
+  verification: PullPluginVerification;
   /** Plugin kinds registered after install. */
   kinds: PluginKinds;
 }
@@ -77,9 +87,9 @@ export interface InstallResult {
 export interface AddSourceRequest {
   kind: string;
   id: string;
-  config: unknown;
+  config: Record<string, unknown>;
   autoStart?: boolean;
-  bootstrap?: { kind: string; config?: unknown };
+  bootstrap?: { kind: string; config?: Record<string, unknown> };
 }
 
 export interface AddQueryRequest {
@@ -93,7 +103,7 @@ export interface AddReactionRequest {
   kind: string;
   id: string;
   queries: string[];
-  config: unknown;
+  config: Record<string, unknown>;
 }
 
 export interface SourceChangeInput {
@@ -124,8 +134,8 @@ export const STREAM_CHANNEL = 'drasi:stream';
 export interface DrasiApi {
   // discovery / install
   browsePlugins(): Promise<DirectoryEntry[]>;
-  listVersions(repository: string): Promise<PluginVersion[]>;
-  installPlugin(reference: string, type: PluginType, kind: string): Promise<InstallResult>;
+  /** Install the latest host-compatible build of a bare repository ref. */
+  installPlugin(repository: string): Promise<InstallResult>;
   importLocalPlugins(dir: string): Promise<PluginKinds>;
   pluginKinds(): Promise<PluginKinds>;
 

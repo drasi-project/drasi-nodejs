@@ -4,7 +4,6 @@
 
 export const IPC = {
   browsePlugins: 'drasi:plugins:browse',
-  listVersions: 'drasi:plugins:versions',
   installPlugin: 'drasi:plugins:install',
   importLocalPlugins: 'drasi:plugins:import',
   pluginKinds: 'drasi:plugins:kinds',

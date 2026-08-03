@@ -12,9 +12,7 @@ import {
 
 const api: DrasiApi = {
   browsePlugins: () => ipcRenderer.invoke(IPC.browsePlugins),
-  listVersions: (repository) => ipcRenderer.invoke(IPC.listVersions, repository),
-  installPlugin: (reference, type, kind) =>
-    ipcRenderer.invoke(IPC.installPlugin, reference, type, kind),
+  installPlugin: (repository) => ipcRenderer.invoke(IPC.installPlugin, repository),
   importLocalPlugins: (dir) => ipcRenderer.invoke(IPC.importLocalPlugins, dir),
   pluginKinds: () => ipcRenderer.invoke(IPC.pluginKinds),
 
