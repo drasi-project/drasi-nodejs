@@ -18,12 +18,7 @@ import {
   streamLogs,
   streamResults,
 } from './engine-host.js';
-import {
-  browsePlugins,
-  importLocalPlugins,
-  installPlugin,
-  listVersions,
-} from './registry-service.js';
+import { browsePlugins, importLocalPlugins, installPlugin } from './registry-service.js';
 import {
   forgetQuery,
   forgetReaction,
@@ -68,10 +63,7 @@ async function doAddReaction(req: AddReactionRequest): Promise<void> {
 export function registerIpc(): void {
   // ---- discovery / install ----
   handle(IPC.browsePlugins, () => browsePlugins());
-  handle(IPC.listVersions, (repository: string) => listVersions(repository));
-  handle(IPC.installPlugin, (reference: string, type: any, kind: string) =>
-    installPlugin(reference, type, kind),
-  );
+  handle(IPC.installPlugin, (repository: string) => installPlugin(repository));
   handle(IPC.importLocalPlugins, (dir: string) => importLocalPlugins(dir));
   handle(IPC.pluginKinds, () => getEngine().pluginKinds());
 

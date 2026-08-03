@@ -14,7 +14,7 @@ for what `drasi-server` does, built entirely on the Node bindings.
 ```
 ┌─────────────────────────── Electron main process (Node) ───────────────────────────┐
 │  engine-host.ts   → one Drasi engine (redb state store, userData/plugins, secrets)   │
-│  registry-service.ts → listPluginTags / pullPlugin against ghcr.io/drasi-project     │
+│  registry-service.ts → browse + installPlugin(bare ref) against ghcr.io/drasi-project │
 │  ipc.ts           → ipcMain.handle(...) command handlers + topology persistence      │
 │                     wires onAllEvents / on*Logs / a hidden addJsReaction per query   │
 └───────────────▲───────────────────────────────────────────────┬─────────────────────┘
@@ -68,8 +68,9 @@ main/preload and renderer projects.
 
 ## Using the app
 
-1. **Plugins** — browse the live directory (`ghcr.io/drasi-project`), pick a version
-   matched to your platform, and **Install**. Installed binaries land in
+1. **Plugins** — browse the live directory (`ghcr.io/drasi-project`) and **Install**.
+   Each install uses a bare repository ref (e.g. `source/postgres`); the engine picks
+   the latest host-compatible build, platform tag, and filename. Binaries land in
    `<userData>/plugins` and are hot-loaded (and reloaded on restart). You can also
    *Import from folder…* to register locally-built plugins.
 2. **Sources** — add a source from an installed kind (JSON config, optional bootstrap
@@ -91,8 +92,8 @@ store (`state.redb`), and the created topology (`topology.json`, restored on lau
 - **Secrets** are seeded once at engine creation. Drop a `secrets.json`
   (`{ "NAME": "value" }`) into the app's `userData` dir before launch to make them
   available to plugin `ConfigValue::Secret` references.
-- **Platform tags**: installs pick the tag matching your OS/arch (e.g.
-  `windows-msvc-amd64`, falling back to `windows-amd64`); some plugins may not publish
-  a build for every platform.
+- **Compatible builds only**: `installPlugin` selects a build that matches this
+  engine's platform and SDK/core/lib versions. Plugins without a compatible artifact
+  for your host will fail to install with a clear error.
 - CSP allows `unsafe-eval`/`unsafe-inline` to accommodate the Vite dev server; tighten
   it for a production build if you harden this beyond an example.

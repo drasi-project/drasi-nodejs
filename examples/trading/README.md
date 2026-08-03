@@ -20,9 +20,10 @@ demo, reduced to the smallest amount of code that still conveys the key ideas:
 - **Application reaction** — one `addJsReaction` per query streams result diffs
   straight to the renderer over a single IPC channel; the dashboard merges
   ADD/UPDATE/DELETE/aggregation diffs into live tables.
-- **Plugins downloaded at runtime** — the Postgres source + bootstrap plugins
-  are pulled from the public OCI registry (`ghcr.io/drasi-project`) on first
-  launch and cached under the app's user-data directory. Nothing is baked in.
+- **Plugins installed at runtime** — the Postgres source + bootstrap plugins are
+  installed via bare refs (`installPlugin('source/postgres')`, …) from the public
+  OCI registry on first launch and cached under the app's user-data directory.
+  The engine picks the platform-compatible artifact; nothing is baked in.
 
 ## Architecture
 
@@ -100,7 +101,7 @@ and are ported verbatim from the upstream demo.
 | Upstream (drasi-server trading) | This example |
 | --- | --- |
 | PostgreSQL via docker-compose (`wal_level=logical`, init.sql) | Same (`database/docker-compose.yml` + trimmed `database/init.sql`) |
-| `postgres-stocks` CDC source + `postgres` bootstrap | Same plugins, **downloaded from OCI at startup** |
+| `postgres-stocks` CDC source + `postgres` bootstrap | Same plugins, **installed via `installPlugin` at startup** |
 | HTTP price feed + Python generator | In-process Node random-walk → JavaScript source `price-feed` |
 | SSE reaction + browser `EventSource` | `addJsReaction` → single IPC channel → renderer |
 | REST API to create queries/reactions | Direct engine calls in `main` at startup |

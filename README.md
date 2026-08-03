@@ -151,7 +151,7 @@ or [`docs/api-reference.md`](./docs/api-reference.md) for the audit-oriented dee
 
 | Area | Methods |
 | --- | --- |
-| Plugins | `loadPlugins(dir, verify?)`, `watchPlugins(dir)`, `pluginKinds()`, `sourceConfigSchema(kind)`, `reactionConfigSchema(kind)`, `bootstrapConfigSchema(kind)`, `listPluginTags(repo)`, `pullPlugin(reference, destDir, filename, options?)` |
+| Plugins | `loadPlugins(dir, verify?)`, `watchPlugins(dir)`, `pluginKinds()`, `sourceConfigSchema(kind)`, `reactionConfigSchema(kind)`, `bootstrapConfigSchema(kind)`, `resolvePlugin(reference)`, `installPlugin(reference, destDir, options?)`, `listPluginTags(repo)`, `pullPlugin(reference, destDir, filename, options?)` |
 | Sources | `addSource(kind, id, config, autoStart?, bootstrap?)`, `addJsSource(id, autoStart?)`, `pushChange(sourceId, change)`, `updateSource`, `startSource`, `stopSource`, `removeSource`, `listSources`, `getSourceSchema(id)`, `getGraphSchema()` |
 | Queries | `addQuery(id, query, sources, language?, joins?, middleware?)`, `updateQuery`, `startQuery`, `stopQuery`, `removeQuery`, `getQueryResults(id)`, `listQueries` |
 | Reactions | `addReaction(kind, id, queryIds, config)`, `addJsReaction(id, queryIds, cb)`, `addDurableJsReaction(id, queryIds, asyncCb, options?)`, `updateReaction`, `startReaction`, `stopReaction`, `removeReaction`, `listReactions` |
@@ -262,7 +262,8 @@ pinned versions alongside `drasi-plugin-sdk` when upgrading the SDK.
 ## Roadmap
 
 Implemented: dynamic plugin loading (+ optional SHA-256 verification), OCI plugin
-fetch from `ghcr.io/drasi-project` (`pullPlugin`/`listPluginTags`) with opt-in
+install from `ghcr.io/drasi-project` (`installPlugin`/`resolvePlugin`, plus
+low-level `pullPlugin`/`listPluginTags`) with opt-in
 cosign signature enforcement, JS sources (nodes + relations + bootstrap replay)
 and reactions (including **durable, checkpointed** reactions), event & log
 streaming, secret/env config resolution for plugins, bootstrap-provider wiring,

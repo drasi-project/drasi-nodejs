@@ -88,7 +88,7 @@ export async function initEngine(): Promise<void> {
 
   engine = await Drasi.create('trading', {});
 
-  // Plugins are downloaded from the OCI registry at startup, never baked in.
+  // Plugins are installed via bare refs (installPlugin) at startup, never baked in.
   await ensurePlugins(engine, pluginsDir);
   await engine.start();
 

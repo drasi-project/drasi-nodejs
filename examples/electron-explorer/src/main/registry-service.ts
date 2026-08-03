@@ -1,42 +1,14 @@
 // Registry service: live plugin discovery + install against ghcr.io/drasi-project,
-// using the engine's OCI methods (listPluginTags / pullPlugin / loadPlugins).
+// using the engine's platform-aware installPlugin (and listPluginTags for the
+// directory catalog).
 
 import { getEngine, getPluginsDir } from './engine-host.js';
-import type {
-  DirectoryEntry,
-  InstallResult,
-  PluginKinds,
-  PluginType,
-  PluginVersion,
-} from '../shared/types.js';
+import type { DirectoryEntry, InstallResult, PluginKinds, PluginType } from '../shared/types.js';
 
-const REGISTRY = 'ghcr.io/drasi-project';
 const DIRECTORY_REPO = 'drasi-plugin-directory';
 
 /** Plugin types the explorer can create components from. */
 const SUPPORTED_TYPES: PluginType[] = ['source', 'reaction', 'bootstrap'];
-
-/** Primary + fallback OCI arch suffixes for the current platform. */
-function platformSuffixes(): { primary: string; fallbacks: string[] } {
-  const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
-  switch (process.platform) {
-    case 'win32':
-      return { primary: `windows-msvc-${arch}`, fallbacks: [`windows-${arch}`] };
-    case 'darwin':
-      return { primary: `darwin-${arch}`, fallbacks: [] };
-    default:
-      return { primary: `linux-${arch}`, fallbacks: [] };
-  }
-}
-
-/** Native cdylib filename/extension for the current platform. */
-function nativeName(type: PluginType, kind: string): string {
-  const k = kind.replace(/-/g, '_');
-  const base = `drasi_${type}_${k}`;
-  if (process.platform === 'win32') return `${base}.dll`;
-  if (process.platform === 'darwin') return `lib${base}.dylib`;
-  return `lib${base}.so`;
-}
 
 /** Enumerate the live plugin directory, grouped into supported types. */
 export async function browsePlugins(): Promise<DirectoryEntry[]> {
@@ -55,54 +27,32 @@ export async function browsePlugins(): Promise<DirectoryEntry[]> {
   return entries;
 }
 
-function compareSemver(a: string, b: string): number {
-  return a.localeCompare(b, undefined, { numeric: true });
-}
-
-/** List installable versions of a plugin matched to the current platform. */
-export async function listVersions(repository: string): Promise<PluginVersion[]> {
-  const engine = getEngine();
-  const tags = (await engine.listPluginTags(repository)) as string[];
-  const { primary, fallbacks } = platformSuffixes();
-
-  const collect = (suffix: string): PluginVersion[] =>
-    tags
-      .filter((t) => t.endsWith(`-${suffix}`))
-      .map((tag) => ({
-        version: tag.slice(0, tag.length - suffix.length - 1),
-        tag,
-        reference: `${REGISTRY}/${repository}:${tag}`,
-      }));
-
-  let versions = collect(primary);
-  for (const fb of fallbacks) {
-    if (versions.length === 0) versions = collect(fb);
-  }
-  versions.sort((a, b) => compareSemver(b.version, a.version));
-  return versions;
-}
-
-/** Download a plugin to the plugins dir and register it. */
-export async function installPlugin(
-  reference: string,
-  type: PluginType,
-  kind: string,
-): Promise<InstallResult> {
+/**
+ * Download the latest host-compatible build of `repository` (e.g. "source/postgres")
+ * into the plugins dir and register it. Platform, filename, and version selection
+ * are handled by the engine.
+ */
+export async function installPlugin(repository: string): Promise<InstallResult> {
   const engine = getEngine();
   const dir = getPluginsDir();
-  const filename = nativeName(type, kind);
-  const result = (await engine.pullPlugin(reference, dir, filename)) as {
+  const result = (await engine.installPlugin(repository, dir)) as {
     path: string;
-    verification: string;
+    resolved: InstallResult['resolved'];
+    verification: InstallResult['verification'];
   };
   await engine.loadPlugins(dir);
-  const kinds = (await engine.pluginKinds()) as PluginKinds;
-  return { path: result.path, verification: result.verification, kinds };
+  const kinds = engine.pluginKinds() as PluginKinds;
+  return {
+    path: result.path,
+    resolved: result.resolved,
+    verification: result.verification,
+    kinds,
+  };
 }
 
 /** Register plugins already present in a local folder (copy not performed). */
 export async function importLocalPlugins(dir: string): Promise<PluginKinds> {
   const engine = getEngine();
   await engine.loadPlugins(dir);
-  return (await engine.pluginKinds()) as PluginKinds;
+  return engine.pluginKinds() as PluginKinds;
 }
