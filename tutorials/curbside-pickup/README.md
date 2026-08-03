@@ -76,10 +76,23 @@ locally if you prefer.
 
 ### Option A: Dev Container or GitHub Codespaces (recommended)
 
-1. Open the [`drasi-nodejs`](https://github.com/drasi-project/drasi-nodejs) repository in VS
-   Code and run **Reopen in Container** (or create a **Codespace** from the repo's **Code**
-   menu).
-2. When prompted for a configuration, choose **Drasi Node.js — Curbside Pickup Tutorial**.
+This repo has several tutorial dev containers. Codespaces does **not** ask which one to use
+if you click **Create codespace** on the default **Code** menu — pick the configuration
+explicitly (or use the link below).
+
+1. **GitHub Codespaces:** Open
+   [this Codespaces link](https://codespaces.new/drasi-project/drasi-nodejs?devcontainer_path=.devcontainer/curbside-pickup/devcontainer.json)
+   (it selects **Drasi Node.js — Curbside Pickup Tutorial** for you).
+
+   Or from the repo page: **Code** → **Codespaces** → **…** next to **Create codespace on
+   main** → **New with options…**, set **Dev container configuration** to **Drasi Node.js —
+   Curbside Pickup Tutorial**, then create the codespace.
+
+2. **VS Code (local):** Open the
+   [`drasi-nodejs`](https://github.com/drasi-project/drasi-nodejs) repository and run
+   **Dev Containers: Reopen in Container**. When prompted for a configuration, choose
+   **Drasi Node.js — Curbside Pickup Tutorial**.
+
 3. Wait for the container to finish. Its setup script installs Node dependencies for the
    tutorial.
 
