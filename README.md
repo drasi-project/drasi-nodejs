@@ -248,7 +248,7 @@ Promises driven by a Tokio runtime.
 The Drasi engine and host SDK are consumed from crates.io. The workspace versions
 its crates on independent lines — only `drasi-host-sdk` and `drasi-plugin-sdk`
 track the shared workspace version — so the pinned numbers differ by design
-(`drasi-host-sdk`/`drasi-plugin-sdk` 0.10, `drasi-lib` 0.8, `drasi-core` 0.5), yet
+(`drasi-host-sdk`/`drasi-plugin-sdk` 0.11, `drasi-lib` 0.9, `drasi-core` 0.5), yet
 their published dependency requirements resolve to a single coherent graph. Exact
 versions are locked in `Cargo.lock`.
 

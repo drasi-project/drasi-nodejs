@@ -194,8 +194,13 @@ impl Reaction for JsReaction {
             }
             ReactionCallback::Durable(cb) => {
                 // Load persisted checkpoints so already-checkpointed results are
-                // skipped, then run drasi-lib's stock checkpoint-aware loop. The
-                // handler applies the configured error policy (issue #21):
+                // skipped, then run a checkpoint-aware loop. drasi-lib 0.9's
+                // `run_standard_loop` applies the recovery policy to handler
+                // errors (Strict stops; AutoSkipGap checkpoints the failed
+                // sequence), which would break the JS `onError` contract, so
+                // this loop owns that decision and uses `CheckpointState` only
+                // to persist successful side effects. The handler applies the
+                // configured error policy (issue #21):
                 //   * `retry` (default) re-invokes the JS callback with backoff
                 //     until it resolves. Because `run_standard_loop` stays parked
                 //     on the event until the handler returns, the checkpoint can
@@ -213,11 +218,15 @@ impl Reaction for JsReaction {
                 let base_handler = self.base.clone_shared();
                 let callback = cb.clone();
                 let policy = self.error_policy;
+                let recovery_policy = self.recovery_policy;
                 let cancel_tx = self.cancel_tx.clone();
                 let reaction_id = self.base.id.clone();
                 tokio::spawn(async move {
-                    let result = base_loop
-                        .run_standard_loop(shutdown_rx, checkpoints, move |event: Arc<QueryResult>| {
+                    let mut shutdown_rx = shutdown_rx;
+                    let mut checkpoint_state =
+                        drasi_lib::reactions::common::CheckpointState::load(&base_loop).await;
+                    checkpoint_state.seed(checkpoints);
+                    let handler = move |event: Arc<QueryResult>| {
                             let callback = callback.clone();
                             let cancel_tx = cancel_tx.clone();
                             let base = base_handler.clone_shared();
@@ -294,10 +303,56 @@ impl Reaction for JsReaction {
                                     }
                                 }
                             }
-                        })
-                        .await;
-                    if let Err(e) = result {
-                        log::error!("js durable reaction loop error: {e}");
+                    };
+                    loop {
+                        let event = tokio::select! {
+                            biased;
+                            _ = &mut shutdown_rx => break,
+                            event = base_loop.priority_queue.dequeue() => event,
+                        };
+                        let query_id = event.query_id.clone();
+                        let seq = event.sequence;
+                        if let Some(cp) = checkpoint_state.get(&query_id) {
+                            if seq <= cp.sequence {
+                                continue;
+                            }
+                        }
+                        match handler(Arc::clone(&event)).await {
+                            Ok(()) => {
+                                if let Err(e) = checkpoint_state
+                                    .advance_with_policy(
+                                        &base_loop,
+                                        &query_id,
+                                        seq,
+                                        recovery_policy,
+                                    )
+                                    .await
+                                {
+                                    log::error!(
+                                        "[{}] checkpoint write failed for query={query_id} seq={seq}: {e:#}",
+                                        base_loop.id
+                                    );
+                                    base_loop
+                                        .set_status(
+                                            ComponentStatus::Error,
+                                            Some(format!(
+                                                "checkpoint write failed for query '{query_id}' (seq {seq})"
+                                            )),
+                                        )
+                                        .await;
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                // Skip, or halt unwinding after cancel: do not
+                                // advance the checkpoint, and keep going so a
+                                // later success can bury a skipped sequence.
+                                log::error!(
+                                    "[{}] handler error for query={query_id} seq={seq}: {e:#}",
+                                    base_loop.id
+                                );
+                            }
+                        }
                     }
                 })
             }

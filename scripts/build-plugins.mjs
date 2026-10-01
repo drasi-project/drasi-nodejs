@@ -17,11 +17,11 @@ const ext = process.platform === 'win32' ? 'dll' : process.platform === 'darwin'
 const prefix = process.platform === 'win32' ? '' : 'lib';
 
 // [crate name, published version, compiled cdylib basename]. The versions must
-// depend on `drasi-plugin-sdk` ^0.10 to stay ABI-compatible with the host's
+// depend on `drasi-plugin-sdk` ^0.11 to stay ABI-compatible with the host's
 // `drasi-host-sdk` (see Cargo.toml). Bump these together when upgrading the SDK.
 const plugins = [
-  ['drasi-source-mock', '0.2.7', 'drasi_source_mock'],
-  ['drasi-reaction-log', '0.2.5', 'drasi_reaction_log'],
+  ['drasi-source-mock', '0.2.12', 'drasi_source_mock'],
+  ['drasi-reaction-log', '0.2.9', 'drasi_reaction_log'],
 ];
 
 const outDir = join(root, 'plugins');

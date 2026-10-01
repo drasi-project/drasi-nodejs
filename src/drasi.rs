@@ -28,6 +28,7 @@ use drasi_lib::identity::{
     ApplicationIdentityProvider, Credentials, IdentityProvider, PasswordIdentityProvider,
 };
 use drasi_lib::{DrasiLib, MemorySecretStoreProvider, Query};
+use drasi_plugin_sdk::ffi::FfiLogLevelFilter;
 use drasi_plugin_sdk::{
     BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
     SourcePluginDescriptor,
@@ -2042,6 +2043,20 @@ fn build_query_def(
     Ok(builder.build())
 }
 
+/// Level forwarded into plugins after load.
+///
+/// host-sdk 0.11 drops plugin logs below `effective_host_log_level()` before
+/// they cross the FFI, so they never reach `onSourceLogs`. That hint follows
+/// `RUST_LOG` and is Off or Error in quiet hosts. The JS log callback is a
+/// separate channel from stderr, so floor at info. A more verbose `RUST_LOG`
+/// (`debug` / `trace`) is kept.
+fn plugin_forward_level() -> FfiLogLevelFilter {
+    match callbacks::effective_host_log_level() {
+        verbose @ (FfiLogLevelFilter::Debug | FfiLogLevelFilter::Trace) => verbose,
+        _ => FfiLogLevelFilter::Info,
+    }
+}
+
 /// Scan `dir` for cdylib plugins and register their descriptors into `inner`.
 /// Returns `(plugins, sources, reactions, bootstrap, secret_stores,
 /// identity_providers)` counts.
@@ -2091,11 +2106,13 @@ fn load_dir_into(
         callback_ctx as *mut std::ffi::c_void,
         callbacks::default_lifecycle_callback_fn(),
     )?;
+    let forward_level = plugin_forward_level();
 
     let (mut plugins, mut sources, mut reactions, mut bootstrap, mut secret_stores, mut identity_providers) =
         (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
 
     for mut plugin in loaded {
+        plugin.set_log_level(forward_level);
         plugins += 1;
         let file = plugin.file_path.to_string_lossy().to_string();
         let mut rec = PluginFileKinds::default();
