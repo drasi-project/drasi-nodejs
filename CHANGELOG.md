@@ -9,6 +9,25 @@ release process.
 
 ## [Unreleased]
 
+### Changed
+
+- **Embedded Drasi updated to the 2026-09-25 release set.** The addon now links
+  `drasi-lib` 0.9.3, `drasi-core` 0.5.10, `drasi-host-sdk` / `drasi-plugin-sdk`
+  0.11.3, `drasi-state-store-redb` 0.2.8, and `drasi-index-rocksdb` 0.6.4
+  (previously 0.8.9 / 0.5.7 / 0.10.0 / 0.2.4 / 0.5.8). `resolvePlugin` and
+  `installPlugin` select artifacts compatible with this set.
+- **`onSourceLogs` delivers plugin info logs even when `RUST_LOG` is quiet.**
+  Host-sdk 0.11 drops plugin logs below the process tracing level before they
+  cross the FFI. `loadPlugins` floors that filter at info so the callback still
+  fires. `RUST_LOG=debug` or `trace` still forwards the more verbose records.
+
+### Breaking
+
+- **Plugin FFI ABI is now 0.14.** Plugins built against the previous addon
+  (host-sdk 0.10) will not load. Reinstall them with `installPlugin`, or rebuild
+  them against `drasi-plugin-sdk` 0.11.3, before calling `loadPlugins`. That
+  crate's metadata SDK string is 0.14.0, which is what the loader checks.
+
 ## [0.2.2] - 2026-07-31
 
 ### Added
