@@ -9,6 +9,8 @@ release process.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-01
+
 ### Changed
 
 - **Embedded Drasi updated to the 2026-09-25 release set.** The addon now links
