@@ -19,5 +19,6 @@ mod retry;
 mod secrets;
 mod types;
 mod verification;
+mod wal;
 
 pub use drasi::Drasi;

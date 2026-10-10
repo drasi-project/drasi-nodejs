@@ -96,9 +96,11 @@ Create a new, **not-yet-started** engine instance.
 - `walProvider?: { kind?: 'redb', path: string }` — supplies the process-wide
   write-ahead log used by transient sources such as HTTP, gRPC, application, and
   OpenTelemetry when their own durability option is enabled. `kind` defaults to
-  `redb`; `path` is a directory, and each source uses
-  `{path}/{sourceId}.redb`. This is not a PostgreSQL replication slot and does
-  not resume PostgreSQL CDC.
+  `redb`; `path` is a directory. Source IDs are mapped to safe redb filenames
+  without changing the ids exposed to queries or callbacks. `close()` releases
+  the open WAL databases so another engine in the same process can reuse the
+  directory. This is not a PostgreSQL replication slot and does not resume
+  PostgreSQL CDC.
 - `identity?: { kind: 'password' | 'token', username?, password?, token? }` —
   wires a built-in identity provider (audit gap G8) that injects credentials into
   sources/reactions connecting to external systems.

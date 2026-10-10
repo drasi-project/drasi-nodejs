@@ -327,6 +327,53 @@ await drasi.close();
   assert.match(run('read'), /READ=true/, 'reader replayed the WAL-only event');
 });
 
+test('redb WAL accepts source ids that are not safe filenames', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-wal-source-id-'));
+  const port = await reservePort();
+  const d = await Drasi.create('t-wal-source-id', {
+    walProvider: { path: join(dir, 'wal') },
+  });
+  await d.loadPlugins(pluginsDir);
+  await d.start();
+  await d.addSource('http', 'events.v1', {
+    host: '127.0.0.1',
+    port,
+    durability: { enabled: true },
+  });
+  const ready = await waitUntil(async () => {
+    try {
+      return (await fetch(`http://127.0.0.1:${port}/health`)).ok;
+    } catch {
+      return false;
+    }
+  });
+  assert.ok(ready, 'durable source with a dotted id started');
+  await d.close();
+});
+
+test('close releases a redb WAL directory for same-process reuse', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-wal-reopen-'));
+  const walPath = join(dir, 'wal');
+  const open = async (id) => {
+    const port = await reservePort();
+    const d = await Drasi.create(id, { walProvider: { path: walPath } });
+    await d.loadPlugins(pluginsDir);
+    await d.start();
+    await d.addSource('http', 'events', {
+      host: '127.0.0.1',
+      port,
+      durability: { enabled: true },
+    });
+    return d;
+  };
+
+  const first = await open('t-wal-reopen-1');
+  await first.close();
+  await first.close();
+  const second = await open('t-wal-reopen-2');
+  await second.close();
+});
+
 // G8: a built-in password identity provider is accepted and the engine runs.
 test('engine builds with a password identity provider', async () => {
   const d = await Drasi.create('t-identity', { identity: { kind: 'password', username: 'u', password: 'p' } });

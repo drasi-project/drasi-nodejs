@@ -58,8 +58,9 @@ import { Drasi } from '@drasi/lib';
   so a given path may be used by only one engine at a time.
 - `walProvider?: { kind?: 'redb', path: string }` — supplies the shared
   write-ahead log for transient sources that enable durability. `kind` defaults
-  to `redb`; `path` is a directory, with one `{sourceId}.redb` file per source.
-  This is not a PostgreSQL replication slot and does not resume PostgreSQL CDC.
+  to `redb`; `path` is a directory. Source IDs are mapped to safe redb filenames,
+  and `close()` releases the databases for reuse in the same process. This is not
+  a PostgreSQL replication slot and does not resume PostgreSQL CDC.
 - `identity?: { kind: 'password' | 'token', username?, password?, token? }` — wires a
   built-in identity provider that injects credentials into sources/reactions.
 

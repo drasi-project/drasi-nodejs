@@ -43,6 +43,7 @@ use crate::secrets::{
     SwappableSecretStoreProvider,
 };
 use crate::verification::{verification_decision, verification_to_json};
+use crate::wal::ManagedWalProvider;
 
 /// File patterns for discovering cdylib plugins (Unix + Windows naming).
 const PLUGIN_FILE_PATTERNS: &[&str] = &[
@@ -94,6 +95,10 @@ struct Inner {
     /// Whether a durable (disk-backed) state store is configured — required for
     /// durable JS reactions (audit gap G7).
     has_durable_state_store: bool,
+    /// Closeable wrapper around the configured WAL backend. DrasiLib and plugin
+    /// proxies keep the wrapper alive, while `close()` drops its concrete
+    /// provider to release database handles deterministically.
+    wal_provider: Option<Arc<ManagedWalProvider>>,
     /// Leaked `ConfigResolverContext` pointer (process-lifetime) injected into
     /// plugins so they can resolve `ConfigValue::Secret`/`EnvironmentVariable`.
     ///
@@ -160,6 +165,9 @@ impl Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        if let Some(provider) = &self.wal_provider {
+            provider.close();
+        }
         // Reclaim the per-instance resolver thread when the engine is dropped.
         // The leaked context boxes remain (a plugin cdylib holds raw pointers to
         // them for the life of the process); only the OS thread is reclaimed.
@@ -1374,6 +1382,9 @@ impl Drasi {
         }
         self.inner.watchers.lock().unwrap().clear();
         self.inner.js_source_senders.lock().unwrap().clear();
+        if let Some(provider) = &self.inner.wal_provider {
+            provider.close();
+        }
         // Terminate the resolver thread now (deterministic reclaim). `Drop`
         // repeats this for the GC path; both calls are idempotent.
         self.inner.shutdown_config_resolver();
@@ -1651,9 +1662,13 @@ async fn build_engine(
             drasi_index_rocksdb::RocksDbIndexProvider::new(idx.path, idx.enable_archive, idx.direct_io);
         builder = builder.with_default_index_provider("rocksdb", Arc::new(provider));
     }
-    if let Some(path) = params.wal_path {
-        let provider = drasi_wal_redb::RedbWalProvider::new(path);
-        builder = builder.with_wal_provider(Arc::new(provider));
+    let wal_provider = params.wal_path.map(|path| {
+        Arc::new(ManagedWalProvider::new(Arc::new(
+            drasi_wal_redb::RedbWalProvider::new(path),
+        )))
+    });
+    if let Some(provider) = &wal_provider {
+        builder = builder.with_wal_provider(provider.clone());
     }
     // Identity provider for credential injection into sources/reactions (gap G8).
     if let Some(identity) = params.identity {
@@ -1675,6 +1690,7 @@ async fn build_engine(
             active_secret_provider,
             instance_id: id,
             has_durable_state_store,
+            wal_provider,
             resolver_ctx: OnceLock::new(),
             callback_ctx: OnceLock::new(),
         }),
