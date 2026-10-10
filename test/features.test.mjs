@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 
@@ -143,6 +144,22 @@ const waitUntil = async (fn, { timeout = 5000, interval = 50 } = {}) => {
   return false;
 };
 
+const reservePort = () =>
+  new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close();
+        reject(new Error('failed to reserve a TCP port'));
+        return;
+      }
+      server.close((err) => (err ? reject(err) : resolve(address.port)));
+    });
+  });
+
 // G6: a RocksDB persistent index backend is wired and query results flow through it.
 test('engine runs with a rocksdb index backend', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'drasi-rocks-'));
@@ -208,6 +225,153 @@ await d.close();
   // Process 2 opens the SAME index path and, without pushing anything, recovers
   // the prior result from disk.
   assert.match(run('read'), /RESULT=true/, 'restart process recovered the persisted result without re-pushing');
+});
+
+// #41: a durability-enabled transient source persists an event that no query
+// processed, then replays it to the same persistent query in a new process.
+// Posting Bob only after stopQuery completes isolates WAL replay from RocksDB
+// query-result hydration: Bob was acknowledged by HTTP but never indexed.
+test('redb WAL replays an unprocessed HTTP event across engine processes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-wal-persist-'));
+  const idxPath = join(dir, 'idx');
+  const walPath = join(dir, 'wal');
+  const addon = join(root, 'index.js');
+  const port = await reservePort();
+  const helper = join(dir, 'wal-child.mjs');
+
+  writeFileSync(
+    helper,
+    `import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const [,, addonPath, pluginsDir, mode, idxPath, walPath, portText] = process.argv;
+const { Drasi } = require(addonPath);
+const port = Number(portText);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitUntil = async (fn, timeout = 8000) => {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try { if (await fn()) return true; } catch {}
+    await sleep(50);
+  }
+  return false;
+};
+const url = 'http://127.0.0.1:' + port;
+const sourceConfig = {
+  host: '127.0.0.1',
+  port,
+  durability: { enabled: true },
+};
+const query = 'MATCH (p:Person) RETURN p.name AS name';
+const post = async (id, name) => {
+  const response = await fetch(url + '/sources/events/events', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      operation: 'insert',
+      element: { type: 'node', id, labels: ['Person'], properties: { name } },
+    }),
+  });
+  if (!response.ok) throw new Error('HTTP source rejected event: ' + response.status);
+};
+const ready = async () => {
+  try { return (await fetch(url + '/health')).ok; } catch { return false; }
+};
+const hasName = async (drasi, name) =>
+  (await drasi.getQueryResults('q')).some((row) => row.name === name);
+
+let drasi;
+if (mode === 'write') {
+  drasi = await Drasi.create('wal-persist', {
+    indexStore: { kind: 'rocksdb', path: idxPath },
+    walProvider: { path: walPath },
+  });
+  await drasi.loadPlugins(pluginsDir);
+  await drasi.start();
+  await drasi.addSource('http', 'events', sourceConfig);
+  await drasi.addQuery('q', query, ['events']);
+  if (!(await waitUntil(ready))) throw new Error('HTTP source did not become ready');
+  await post('p1', 'Alice');
+  if (!(await waitUntil(() => hasName(drasi, 'Alice')))) {
+    throw new Error('writer query did not process Alice');
+  }
+  await drasi.stopQuery('q');
+  await post('p2', 'Bob');
+  process.stdout.write('WRITE=true');
+} else {
+  drasi = await Drasi.fromConfig({
+    id: 'wal-persist',
+    pluginsDir,
+    indexStore: { kind: 'rocksdb', path: idxPath },
+    walProvider: { kind: 'redb', path: walPath },
+    sources: [{ kind: 'http', id: 'events', config: sourceConfig }],
+    queries: [{ id: 'q', query, sources: ['events'] }],
+  });
+  if (!(await waitUntil(() => hasName(drasi, 'Bob')))) {
+    throw new Error('reader query did not replay Bob from the WAL');
+  }
+  process.stdout.write('READ=true');
+}
+await drasi.close();
+`,
+  );
+
+  const run = (mode) =>
+    execFileSync('node', [helper, addon, pluginsDir, mode, idxPath, walPath, String(port)], {
+      cwd: root,
+      env: { ...process.env, RUST_LOG: 'error' },
+      encoding: 'utf8',
+      timeout: 30000,
+    });
+
+  assert.match(run('write'), /WRITE=true/, 'writer persisted the WAL-only event');
+  assert.match(run('read'), /READ=true/, 'reader replayed the WAL-only event');
+});
+
+test('redb WAL accepts source ids that are not safe filenames', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-wal-source-id-'));
+  const port = await reservePort();
+  const d = await Drasi.create('t-wal-source-id', {
+    walProvider: { path: join(dir, 'wal') },
+  });
+  await d.loadPlugins(pluginsDir);
+  await d.start();
+  await d.addSource('http', 'events.v1', {
+    host: '127.0.0.1',
+    port,
+    durability: { enabled: true },
+  });
+  const ready = await waitUntil(async () => {
+    try {
+      return (await fetch(`http://127.0.0.1:${port}/health`)).ok;
+    } catch {
+      return false;
+    }
+  });
+  assert.ok(ready, 'durable source with a dotted id started');
+  await d.close();
+});
+
+test('close releases a redb WAL directory for same-process reuse', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'drasi-wal-reopen-'));
+  const walPath = join(dir, 'wal');
+  const open = async (id) => {
+    const port = await reservePort();
+    const d = await Drasi.create(id, { walProvider: { path: walPath } });
+    await d.loadPlugins(pluginsDir);
+    await d.start();
+    await d.addSource('http', 'events', {
+      host: '127.0.0.1',
+      port,
+      durability: { enabled: true },
+    });
+    return d;
+  };
+
+  const first = await open('t-wal-reopen-1');
+  await first.close();
+  await first.close();
+  const second = await open('t-wal-reopen-2');
+  await second.close();
 });
 
 // G8: a built-in password identity provider is accepted and the engine runs.
