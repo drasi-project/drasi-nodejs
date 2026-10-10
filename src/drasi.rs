@@ -184,8 +184,9 @@ impl Drasi {
     /// `options` may include `{ secrets: { NAME: "value", ... } }` to seed an
     /// in-memory secret store used to resolve `ConfigValue::Secret` references.
     ///
-    /// Option validation (`stateStore`) is performed synchronously and throws a
-    /// typed error (`err.code`); the engine build itself resolves asynchronously.
+    /// Store and provider option validation is performed synchronously and
+    /// throws a typed error (`err.code`); the engine build itself resolves
+    /// asynchronously.
     #[napi(ts_args_type = "id: string, options?: CreateOptions")]
     pub fn create<'a>(
         env: &'a Env,
@@ -211,13 +212,14 @@ impl Drasi {
         // Optional RocksDB persistent query-index backend (gap G6) and identity
         // provider (gap G8) — both validated synchronously for typed errors.
         let index_store = parse_index_store(env, options.as_ref())?;
+        let wal_path = parse_wal_provider(env, options.as_ref())?;
         let identity = parse_identity(env, options.as_ref())?;
 
         env.spawn_future(async move {
             build_engine(
                 id,
                 provider,
-                EngineParams { state_path, index_store, identity },
+                EngineParams { state_path, index_store, wal_path, identity },
             )
             .await
         })
@@ -255,6 +257,7 @@ impl Drasi {
         let provider: Arc<dyn SecretStoreProvider> = Arc::new(store);
         let state_path = parse_state_store(env, Some(&config))?;
         let index_store = parse_index_store(env, Some(&config))?;
+        let wal_path = parse_wal_provider(env, Some(&config))?;
         let identity = parse_identity(env, Some(&config))?;
 
         // Validate required fields synchronously so callers get a typed `err.code`.
@@ -333,7 +336,7 @@ impl Drasi {
             let drasi = build_engine(
                 id,
                 provider,
-                EngineParams { state_path, index_store, identity },
+                EngineParams { state_path, index_store, wal_path, identity },
             )
             .await?;
 
@@ -1461,6 +1464,36 @@ fn parse_index_store(env: &Env, options: Option<&Value>) -> napi::Result<Option<
     }
 }
 
+/// Validate the optional `walProvider` synchronously, returning the root
+/// directory for the redb provider. The provider is shared by all transient
+/// sources, which create one `{source_id}.redb` file beneath this directory.
+fn parse_wal_provider(env: &Env, options: Option<&Value>) -> napi::Result<Option<String>> {
+    let Some(wal) = options.and_then(|o| o.get("walProvider")) else {
+        return Ok(None);
+    };
+    let kind = match wal.get("kind") {
+        None => "redb",
+        Some(value) => value.as_str().unwrap_or(""),
+    };
+    match kind {
+        "redb" => {
+            let path = wal.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                throw_coded(
+                    env,
+                    DrasiErrorCode::WalProviderPathRequired,
+                    "walProvider.path is required for redb",
+                )
+            })?;
+            Ok(Some(path.to_string()))
+        }
+        other => Err(throw_coded(
+            env,
+            DrasiErrorCode::UnknownWalProviderKind,
+            format!("unknown walProvider kind '{other}'"),
+        )),
+    }
+}
+
 /// A built-in identity provider configuration (audit gap G8). Credentials are
 /// injected into sources/reactions that connect to external systems.
 enum IdentityConfig {
@@ -1587,6 +1620,8 @@ struct EngineParams {
     state_path: Option<String>,
     /// RocksDB persistent query-index backend — audit gap G6.
     index_store: Option<RocksIndexConfig>,
+    /// Redb WAL root directory for durability-enabled transient sources.
+    wal_path: Option<String>,
     /// Identity provider for credential injection — audit gap G8.
     identity: Option<IdentityConfig>,
 }
@@ -1615,6 +1650,10 @@ async fn build_engine(
         let provider =
             drasi_index_rocksdb::RocksDbIndexProvider::new(idx.path, idx.enable_archive, idx.direct_io);
         builder = builder.with_default_index_provider("rocksdb", Arc::new(provider));
+    }
+    if let Some(path) = params.wal_path {
+        let provider = drasi_wal_redb::RedbWalProvider::new(path);
+        builder = builder.with_wal_provider(Arc::new(provider));
     }
     // Identity provider for credential injection into sources/reactions (gap G8).
     if let Some(identity) = params.identity {

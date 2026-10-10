@@ -379,6 +379,29 @@ test('validation errors expose stable typed err.code values', async () => {
     /indexStore\.path is required/,
   );
 
+  // WAL-provider validation is synchronous for both construction paths.
+  const expectSyncCode = (fn, code, messageRe) =>
+    assert.throws(fn, (err) => {
+      assert.equal(err.code, code, `expected code ${code}, got ${err.code}`);
+      if (messageRe) assert.match(err.message, messageRe);
+      return true;
+    });
+  for (const factory of [
+    (walProvider) => Drasi.create('t-wal', { walProvider }),
+    (walProvider) => Drasi.fromConfig({ id: 't-wal-config', walProvider }),
+  ]) {
+    expectSyncCode(
+      () => factory({ kind: 'bogus', path: '/tmp/wal' }),
+      'UNKNOWN_WAL_PROVIDER_KIND',
+      /unknown walProvider kind 'bogus'/,
+    );
+    expectSyncCode(
+      () => factory({ kind: 'redb' }),
+      'WAL_PROVIDER_PATH_REQUIRED',
+      /walProvider\.path is required/,
+    );
+  }
+
   // Identity-provider validation (gap G8).
   await expectCode(
     () => Drasi.create('t-id1', { identity: { username: 'u' } }),

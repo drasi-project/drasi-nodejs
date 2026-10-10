@@ -78,6 +78,10 @@ pub enum DrasiErrorCode {
     IndexStorePathRequired,
     #[napi(value = "UNKNOWN_INDEX_STORE_KIND")]
     UnknownIndexStoreKind,
+    #[napi(value = "WAL_PROVIDER_PATH_REQUIRED")]
+    WalProviderPathRequired,
+    #[napi(value = "UNKNOWN_WAL_PROVIDER_KIND")]
+    UnknownWalProviderKind,
     #[napi(value = "IDENTITY_KIND_REQUIRED")]
     IdentityKindRequired,
     #[napi(value = "UNKNOWN_IDENTITY_KIND")]
@@ -121,6 +125,8 @@ impl DrasiErrorCode {
             DrasiErrorCode::PluginSignatureInvalid => "PLUGIN_SIGNATURE_INVALID",
             DrasiErrorCode::IndexStorePathRequired => "INDEX_STORE_PATH_REQUIRED",
             DrasiErrorCode::UnknownIndexStoreKind => "UNKNOWN_INDEX_STORE_KIND",
+            DrasiErrorCode::WalProviderPathRequired => "WAL_PROVIDER_PATH_REQUIRED",
+            DrasiErrorCode::UnknownWalProviderKind => "UNKNOWN_WAL_PROVIDER_KIND",
             DrasiErrorCode::IdentityKindRequired => "IDENTITY_KIND_REQUIRED",
             DrasiErrorCode::UnknownIdentityKind => "UNKNOWN_IDENTITY_KIND",
             DrasiErrorCode::IdentityConfigInvalid => "IDENTITY_CONFIG_INVALID",
@@ -229,6 +235,8 @@ mod tests {
             (DrasiErrorCode::PluginSignatureInvalid, "PLUGIN_SIGNATURE_INVALID"),
             (DrasiErrorCode::IndexStorePathRequired, "INDEX_STORE_PATH_REQUIRED"),
             (DrasiErrorCode::UnknownIndexStoreKind, "UNKNOWN_INDEX_STORE_KIND"),
+            (DrasiErrorCode::WalProviderPathRequired, "WAL_PROVIDER_PATH_REQUIRED"),
+            (DrasiErrorCode::UnknownWalProviderKind, "UNKNOWN_WAL_PROVIDER_KIND"),
             (DrasiErrorCode::IdentityKindRequired, "IDENTITY_KIND_REQUIRED"),
             (DrasiErrorCode::UnknownIdentityKind, "UNKNOWN_IDENTITY_KIND"),
             (DrasiErrorCode::IdentityConfigInvalid, "IDENTITY_CONFIG_INVALID"),

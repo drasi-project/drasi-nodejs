@@ -41,6 +41,9 @@ drasi-core = "0.5.10"
 drasi-host-sdk = { version = "0.11.3", features = ["watcher", "registry"] }
 drasi-plugin-sdk = "0.11.3"
 drasi-state-store-redb = "0.2.8"
+# Redb WAL backend for durability-enabled transient sources
+# (walProvider: { kind: 'redb', path }).
+drasi-wal-redb = "0.2.10"
 # RocksDB persistent query-index backend (indexStore: { kind: 'rocksdb' }, gap G6).
 # Pulls in librocksdb-sys, which compiles a bundled RocksDB C++ library and runs
 # bindgen (needs libclang); CI/release install it. This grows build time and the

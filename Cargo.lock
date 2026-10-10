@@ -678,6 +678,7 @@ dependencies = [
  "drasi-lib",
  "drasi-plugin-sdk",
  "drasi-state-store-redb",
+ "drasi-wal-redb",
  "log",
  "napi",
  "napi-build",
@@ -945,6 +946,23 @@ dependencies = [
  "log",
  "redb",
  "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "drasi-wal-redb"
+version = "0.2.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0a220606c2dc3f9d6857ed14083a01864bec8c16ad62ddfd46af536ef3f93e2"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "drasi-core",
+ "drasi-lib",
+ "log",
+ "ordered-float",
+ "redb",
+ "serde",
  "tokio",
 ]
 

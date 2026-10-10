@@ -21,6 +21,7 @@ const prefix = process.platform === 'win32' ? '' : 'lib';
 // `drasi-host-sdk` (see Cargo.toml). Bump these together when upgrading the SDK.
 const plugins = [
   ['drasi-source-mock', '0.2.12', 'drasi_source_mock'],
+  ['drasi-source-http', '0.2.13', 'drasi_source_http'],
   ['drasi-reaction-log', '0.2.9', 'drasi_reaction_log'],
 ];
 

@@ -75,7 +75,7 @@ Create a new, **not-yet-started** engine instance.
 | Param | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `id` | `string` | yes | Instance id; used in log/callback contexts. |
-| `options` | `CreateOptions` (`any`) | no | See below. |
+| `options` | `CreateOptions` | no | See below. |
 
 `options`:
 - `secrets?: Record<string, string>` — seeds an in-memory secret store that
@@ -93,6 +93,12 @@ Create a new, **not-yet-started** engine instance.
   [#22](https://github.com/drasi-project/drasi-nodejs/issues/22)), so a given path
   may be used by only one engine at a time and cross-restart recovery happens in a
   fresh process.
+- `walProvider?: { kind?: 'redb', path: string }` — supplies the process-wide
+  write-ahead log used by transient sources such as HTTP, gRPC, application, and
+  OpenTelemetry when their own durability option is enabled. `kind` defaults to
+  `redb`; `path` is a directory, and each source uses
+  `{path}/{sourceId}.redb`. This is not a PostgreSQL replication slot and does
+  not resume PostgreSQL CDC.
 - `identity?: { kind: 'password' | 'token', username?, password?, token? }` —
   wires a built-in identity provider (audit gap G8) that injects credentials into
   sources/reactions connecting to external systems.
@@ -100,7 +106,9 @@ Create a new, **not-yet-started** engine instance.
 **Returns:** a `Drasi` instance.
 **Errors:** `stateStore.path is required for redb` / `unknown stateStore kind '<x>'`;
 `indexStore.path is required for rocksdb` (`INDEX_STORE_PATH_REQUIRED`) /
-`unknown indexStore kind '<x>'` (`UNKNOWN_INDEX_STORE_KIND`); `identity.kind is
+`unknown indexStore kind '<x>'` (`UNKNOWN_INDEX_STORE_KIND`);
+`walProvider.path is required for redb` (`WAL_PROVIDER_PATH_REQUIRED`) /
+`unknown walProvider kind '<x>'` (`UNKNOWN_WAL_PROVIDER_KIND`); `identity.kind is
 required` (`IDENTITY_KIND_REQUIRED`), `unknown identity kind '<x>'`
 (`UNKNOWN_IDENTITY_KIND`), or a missing credential field (`IDENTITY_CONFIG_INVALID`);
 engine build errors propagate as-is.
@@ -111,9 +119,10 @@ Build an engine from a declarative config object **and start it**. Equivalent to
 `create` + optional `loadPlugins` + `start` + adding each declared source, query,
 and reaction (which auto-start on the running engine).
 
-`config` (`DrasiConfig`, passed as `any`):
+`config` (`DrasiConfig`):
 - `id?: string` (default `"drasi"`)
-- `secrets?`, `stateStore?`, `indexStore?`, `identity?` — forwarded to `create`.
+- `secrets?`, `stateStore?`, `indexStore?`, `walProvider?`, `identity?` —
+  forwarded to `create`.
 - `pluginsDir?: string` — if present, `loadPlugins(pluginsDir)` runs before start.
 - `sources?: Array<{ kind, id, config?, autoStart?, bootstrap? }>`
 - `queries?: Array<{ id, query, sources, language?, joins?, middleware? }>` — `sources`
@@ -573,7 +582,7 @@ repeats this idempotently for the GC path). The instance must not be used after
 As of [PR #5](https://github.com/drasi-project/drasi-nodejs/pull/5) (team#98, gap
 G2), the generated `index.d.ts` is **self-contained**: these shapes —
 `SourceChangeInput`, `ResultDiff`, `QueryResultEvent`, `LogMessage`,
-`ComponentEvent`, `CreateOptions`, `QueryJoin`, `DrasiConfig`,
+`ComponentEvent`, `CreateOptions`, `WalProviderOptions`, `QueryJoin`, `DrasiConfig`,
 `ComponentStatusEntry`, the metrics objects, and the `DrasiErrorCode` enum — are
 now emitted directly as concrete types (no bare `any`). The original audit found
 every config/result parameter typed as `any`, with the real shapes living only in
