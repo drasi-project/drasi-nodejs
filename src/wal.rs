@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 
 const ENCODED_ID_PREFIX: &str = "__drasi_wal_";
 const HEX: &[u8; 16] = b"0123456789abcdef";
+const MAX_FILENAME_COMPONENT_BYTES: usize = 255;
+const REDB_FILENAME_SUFFIX_BYTES: usize = ".redb".len();
 
 /// A closeable WAL provider that keeps backend filename rules out of source IDs.
 pub(crate) struct ManagedWalProvider {
@@ -126,6 +128,8 @@ fn storage_source_id(source_id: &str) -> Cow<'_, str> {
     let is_native = !source_id.is_empty()
         && !source_id.starts_with('.')
         && !source_id.starts_with(ENCODED_ID_PREFIX)
+        && source_id.len() <= MAX_FILENAME_COMPONENT_BYTES - REDB_FILENAME_SUFFIX_BYTES
+        && !is_windows_reserved_name(source_id)
         && source_id
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-');
@@ -141,6 +145,20 @@ fn storage_source_id(source_id: &str) -> Cow<'_, str> {
         encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
     Cow::Owned(encoded)
+}
+
+fn is_windows_reserved_name(source_id: &str) -> bool {
+    if ["CON", "PRN", "AUX", "NUL"]
+        .iter()
+        .any(|name| source_id.eq_ignore_ascii_case(name))
+    {
+        return true;
+    }
+
+    let bytes = source_id.as_bytes();
+    bytes.len() == 4
+        && (bytes[..3].eq_ignore_ascii_case(b"COM") || bytes[..3].eq_ignore_ascii_case(b"LPT"))
+        && matches!(bytes[3], b'1'..=b'9')
 }
 
 fn remap_error(source_id: &str, error: WalError) -> WalError {
@@ -194,5 +212,23 @@ mod tests {
             storage_source_id("__drasi_wal_deadbeef"),
             "__drasi_wal_deadbeef"
         );
+    }
+
+    #[test]
+    fn windows_reserved_source_ids_get_encoded() {
+        for source_id in [
+            "CON", "con", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9",
+        ] {
+            assert_ne!(storage_source_id(source_id), source_id);
+        }
+    }
+
+    #[test]
+    fn overlong_source_ids_get_encoded() {
+        let max_native = "a".repeat(250);
+        assert_eq!(storage_source_id(&max_native), max_native);
+
+        let overlong = "a".repeat(251);
+        assert_ne!(storage_source_id(&overlong), overlong);
     }
 }

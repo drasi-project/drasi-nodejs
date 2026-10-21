@@ -43,8 +43,10 @@ pub struct StateStoreOptions {
 /// Redb write-ahead log options for durability-enabled transient sources.
 ///
 /// `path` is a directory. Each source stores its WAL in
-/// `{path}/{source_id}.redb`. This is separate from a PostgreSQL replication
-/// slot and does not affect PostgreSQL CDC source recovery.
+/// `{path}/{storage_id}.redb`. The provider preserves portable source IDs and
+/// hashes reserved, overlong, or otherwise unsafe IDs. This is separate from a
+/// PostgreSQL replication slot and does not affect PostgreSQL CDC source
+/// recovery.
 #[napi(object)]
 pub struct WalProviderOptions {
     #[napi(ts_type = "'redb'")]
