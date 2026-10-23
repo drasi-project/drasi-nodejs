@@ -40,6 +40,20 @@ pub struct StateStoreOptions {
     pub path: String,
 }
 
+/// Redb write-ahead log options for durability-enabled transient sources.
+///
+/// `path` is a directory. Each source stores its WAL in
+/// `{path}/{storage_id}.redb`. The provider preserves portable source IDs and
+/// hashes reserved, overlong, or otherwise unsafe IDs. This is separate from a
+/// PostgreSQL replication slot and does not affect PostgreSQL CDC source
+/// recovery.
+#[napi(object)]
+pub struct WalProviderOptions {
+    #[napi(ts_type = "'redb'")]
+    pub kind: Option<String>,
+    pub path: String,
+}
+
 /// Persistent RocksDB query-index backend options (audit gap G6).
 ///
 /// Unlike `stateStore` (redb, plugin runtime state), this persists the
@@ -81,6 +95,7 @@ pub struct CreateOptions {
     pub secrets: Option<Value>,
     pub state_store: Option<StateStoreOptions>,
     pub index_store: Option<IndexStoreOptions>,
+    pub wal_provider: Option<WalProviderOptions>,
     pub identity: Option<IdentityOptions>,
 }
 
@@ -152,6 +167,7 @@ pub struct DrasiConfig {
     pub secrets: Option<Value>,
     pub state_store: Option<StateStoreOptions>,
     pub index_store: Option<IndexStoreOptions>,
+    pub wal_provider: Option<WalProviderOptions>,
     pub identity: Option<IdentityOptions>,
     pub plugins_dir: Option<String>,
     pub sources: Option<Vec<SourceConfig>>,

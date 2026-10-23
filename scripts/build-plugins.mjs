@@ -1,5 +1,5 @@
-// Build the example Drasi plugins (mock source + log reaction) used by the test
-// suite and stage them in `plugins/`. The plugin crates are fetched from
+// Build the mock and HTTP source plugins plus the log reaction used by the test
+// suite, then stage them in `plugins/`. The plugin crates are fetched from
 // crates.io at versions whose `drasi-plugin-sdk` matches the `drasi-host-sdk`
 // this addon links against, so the host and plugins share a compatible plugin-SDK
 // / FFI ABI without needing a local `drasi-core` checkout.
@@ -21,6 +21,7 @@ const prefix = process.platform === 'win32' ? '' : 'lib';
 // `drasi-host-sdk` (see Cargo.toml). Bump these together when upgrading the SDK.
 const plugins = [
   ['drasi-source-mock', '0.2.12', 'drasi_source_mock'],
+  ['drasi-source-http', '0.2.13', 'drasi_source_http'],
   ['drasi-reaction-log', '0.2.9', 'drasi_reaction_log'],
 ];
 
@@ -28,7 +29,7 @@ const outDir = join(root, 'plugins');
 mkdirSync(outDir, { recursive: true });
 
 // Cache crate sources + build artifacts under `target/` (gitignored). A shared
-// CARGO_TARGET_DIR lets the two plugins reuse compiled dependencies.
+// CARGO_TARGET_DIR lets the plugins reuse compiled dependencies.
 const workDir = join(root, 'target', 'plugin-src');
 const sharedTarget = join(root, 'target', 'plugin-build');
 mkdirSync(workDir, { recursive: true });

@@ -56,6 +56,11 @@ import { Drasi } from '@drasi/lib';
   — enables a **persistent query-index backend** so continuous-query indexes and the
   reaction outbox survive restarts. RocksDB holds a process-exclusive lock on `path`,
   so a given path may be used by only one engine at a time.
+- `walProvider?: { kind?: 'redb', path: string }` — supplies the shared
+  write-ahead log for transient sources that enable durability. `kind` defaults
+  to `redb`; `path` is a directory. Source IDs are mapped to safe redb filenames,
+  and `close()` releases the databases for reuse in the same process. This is not
+  a PostgreSQL replication slot and does not resume PostgreSQL CDC.
 - `identity?: { kind: 'password' | 'token', username?, password?, token? }` — wires a
   built-in identity provider that injects credentials into sources/reactions.
 
@@ -70,7 +75,8 @@ source, query, and reaction (which auto-start on the running engine).
 `config` (`DrasiConfig`):
 
 - `id?: string` (default `"drasi"`)
-- `secrets?`, `stateStore?`, `indexStore?`, `identity?` — forwarded to `create`.
+- `secrets?`, `stateStore?`, `indexStore?`, `walProvider?`, `identity?` —
+  forwarded to `create`.
 - `pluginsDir?: string` — if present, `loadPlugins(pluginsDir)` runs before start.
 - `sources?: Array<{ kind, id, config?, autoStart?, bootstrap? }>`
 - `queries?: Array<{ id, query, sources, language?, joins? }>`

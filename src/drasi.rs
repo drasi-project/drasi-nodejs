@@ -43,6 +43,7 @@ use crate::secrets::{
     SwappableSecretStoreProvider,
 };
 use crate::verification::{verification_decision, verification_to_json};
+use crate::wal::ManagedWalProvider;
 
 /// File patterns for discovering cdylib plugins (Unix + Windows naming).
 const PLUGIN_FILE_PATTERNS: &[&str] = &[
@@ -94,6 +95,10 @@ struct Inner {
     /// Whether a durable (disk-backed) state store is configured — required for
     /// durable JS reactions (audit gap G7).
     has_durable_state_store: bool,
+    /// Closeable wrapper around the configured WAL backend. DrasiLib and plugin
+    /// proxies keep the wrapper alive, while `close()` drops its concrete
+    /// provider to release database handles deterministically.
+    wal_provider: Option<Arc<ManagedWalProvider>>,
     /// Leaked `ConfigResolverContext` pointer (process-lifetime) injected into
     /// plugins so they can resolve `ConfigValue::Secret`/`EnvironmentVariable`.
     ///
@@ -160,6 +165,9 @@ impl Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        if let Some(provider) = &self.wal_provider {
+            provider.close();
+        }
         // Reclaim the per-instance resolver thread when the engine is dropped.
         // The leaked context boxes remain (a plugin cdylib holds raw pointers to
         // them for the life of the process); only the OS thread is reclaimed.
@@ -184,8 +192,9 @@ impl Drasi {
     /// `options` may include `{ secrets: { NAME: "value", ... } }` to seed an
     /// in-memory secret store used to resolve `ConfigValue::Secret` references.
     ///
-    /// Option validation (`stateStore`) is performed synchronously and throws a
-    /// typed error (`err.code`); the engine build itself resolves asynchronously.
+    /// Store and provider option validation is performed synchronously and
+    /// throws a typed error (`err.code`); the engine build itself resolves
+    /// asynchronously.
     #[napi(ts_args_type = "id: string, options?: CreateOptions")]
     pub fn create<'a>(
         env: &'a Env,
@@ -211,13 +220,14 @@ impl Drasi {
         // Optional RocksDB persistent query-index backend (gap G6) and identity
         // provider (gap G8) — both validated synchronously for typed errors.
         let index_store = parse_index_store(env, options.as_ref())?;
+        let wal_path = parse_wal_provider(env, options.as_ref())?;
         let identity = parse_identity(env, options.as_ref())?;
 
         env.spawn_future(async move {
             build_engine(
                 id,
                 provider,
-                EngineParams { state_path, index_store, identity },
+                EngineParams { state_path, index_store, wal_path, identity },
             )
             .await
         })
@@ -255,6 +265,7 @@ impl Drasi {
         let provider: Arc<dyn SecretStoreProvider> = Arc::new(store);
         let state_path = parse_state_store(env, Some(&config))?;
         let index_store = parse_index_store(env, Some(&config))?;
+        let wal_path = parse_wal_provider(env, Some(&config))?;
         let identity = parse_identity(env, Some(&config))?;
 
         // Validate required fields synchronously so callers get a typed `err.code`.
@@ -333,7 +344,7 @@ impl Drasi {
             let drasi = build_engine(
                 id,
                 provider,
-                EngineParams { state_path, index_store, identity },
+                EngineParams { state_path, index_store, wal_path, identity },
             )
             .await?;
 
@@ -1371,6 +1382,9 @@ impl Drasi {
         }
         self.inner.watchers.lock().unwrap().clear();
         self.inner.js_source_senders.lock().unwrap().clear();
+        if let Some(provider) = &self.inner.wal_provider {
+            provider.close();
+        }
         // Terminate the resolver thread now (deterministic reclaim). `Drop`
         // repeats this for the GC path; both calls are idempotent.
         self.inner.shutdown_config_resolver();
@@ -1457,6 +1471,36 @@ fn parse_index_store(env: &Env, options: Option<&Value>) -> napi::Result<Option<
             env,
             DrasiErrorCode::UnknownIndexStoreKind,
             format!("unknown indexStore kind '{other}'"),
+        )),
+    }
+}
+
+/// Validate the optional `walProvider` synchronously, returning the root
+/// directory for the redb provider. The provider is shared by all transient
+/// sources, which create one `{source_id}.redb` file beneath this directory.
+fn parse_wal_provider(env: &Env, options: Option<&Value>) -> napi::Result<Option<String>> {
+    let Some(wal) = options.and_then(|o| o.get("walProvider")) else {
+        return Ok(None);
+    };
+    let kind = match wal.get("kind") {
+        None => "redb",
+        Some(value) => value.as_str().unwrap_or(""),
+    };
+    match kind {
+        "redb" => {
+            let path = wal.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                throw_coded(
+                    env,
+                    DrasiErrorCode::WalProviderPathRequired,
+                    "walProvider.path is required for redb",
+                )
+            })?;
+            Ok(Some(path.to_string()))
+        }
+        other => Err(throw_coded(
+            env,
+            DrasiErrorCode::UnknownWalProviderKind,
+            format!("unknown walProvider kind '{other}'"),
         )),
     }
 }
@@ -1587,6 +1631,8 @@ struct EngineParams {
     state_path: Option<String>,
     /// RocksDB persistent query-index backend — audit gap G6.
     index_store: Option<RocksIndexConfig>,
+    /// Redb WAL root directory for durability-enabled transient sources.
+    wal_path: Option<String>,
     /// Identity provider for credential injection — audit gap G8.
     identity: Option<IdentityConfig>,
 }
@@ -1616,6 +1662,14 @@ async fn build_engine(
             drasi_index_rocksdb::RocksDbIndexProvider::new(idx.path, idx.enable_archive, idx.direct_io);
         builder = builder.with_default_index_provider("rocksdb", Arc::new(provider));
     }
+    let wal_provider = params.wal_path.map(|path| {
+        Arc::new(ManagedWalProvider::new(Arc::new(
+            drasi_wal_redb::RedbWalProvider::new(path),
+        )))
+    });
+    if let Some(provider) = &wal_provider {
+        builder = builder.with_wal_provider(provider.clone());
+    }
     // Identity provider for credential injection into sources/reactions (gap G8).
     if let Some(identity) = params.identity {
         builder = builder.with_identity_provider(build_identity_provider(identity));
@@ -1636,6 +1690,7 @@ async fn build_engine(
             active_secret_provider,
             instance_id: id,
             has_durable_state_store,
+            wal_provider,
             resolver_ctx: OnceLock::new(),
             callback_ctx: OnceLock::new(),
         }),

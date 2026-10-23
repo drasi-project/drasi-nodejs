@@ -29,6 +29,7 @@ import type {
   SourceSubscription,
   GraphSchema,
   StateStoreOptions,
+  WalProviderOptions,
 } from '../index.js'
 
 async function construction(): Promise<void> {
@@ -36,6 +37,7 @@ async function construction(): Promise<void> {
     secrets: { API_KEY: 'shh' },
     stateStore: { kind: 'redb', path: '/tmp/state.redb' },
     indexStore: { kind: 'rocksdb', path: '/tmp/idx', enableArchive: false, directIo: false },
+    walProvider: { path: '/tmp/wal' },
     identity: { kind: 'password', username: 'u', password: 'p' },
   }
   const d: Drasi = await Drasi.create('app', opts)
@@ -45,6 +47,7 @@ async function construction(): Promise<void> {
     secrets: { API_KEY: 'shh' },
     stateStore: { kind: 'redb', path: '/tmp/s.redb' },
     indexStore: { kind: 'rocksdb', path: '/tmp/idx2' },
+    walProvider: { kind: 'redb', path: '/tmp/wal2' },
     identity: { kind: 'token', token: 'abc' },
     pluginsDir: './plugins',
     sources: [
@@ -249,6 +252,7 @@ const someCode: DrasiErrorCode = DrasiErrorCode.JsSourceClosed
 const asString: string = someCode
 
 const stateStore: StateStoreOptions = { kind: 'redb', path: '/tmp/x' }
+const walProvider: WalProviderOptions = { path: '/tmp/wal' }
 
 async function schemaDiscovery(): Promise<void> {
   const d: Drasi = await Drasi.create('app')
@@ -283,5 +287,6 @@ export {
   someCode,
   asString,
   stateStore,
+  walProvider,
   schemaDiscovery,
 }
