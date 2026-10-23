@@ -9,6 +9,17 @@ release process.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-23
+
+### Added
+
+- **Configurable redb write-ahead logging for transient sources.**
+  `Drasi.create` and `Drasi.fromConfig` accept
+  `walProvider: { kind?: 'redb', path }`. Durability-enabled sources can replay
+  events after a process restart. The provider accepts arbitrary source IDs,
+  releases database handles on `close()`, and reports stable validation error
+  codes for missing paths and unknown provider kinds.
+
 ## [0.3.0] - 2026-10-01
 
 ### Changed
@@ -163,7 +174,10 @@ release process.
   packages with npm build provenance (OIDC-first, `NPM_TOKEN` fallback).
 - Maintainer release guide (`docs/releasing.md`) and this changelog.
 
-[Unreleased]: https://github.com/drasi-project/drasi-nodejs/compare/v0.2.1...main
+[Unreleased]: https://github.com/drasi-project/drasi-nodejs/compare/v0.4.0...main
+[0.4.0]: https://github.com/drasi-project/drasi-nodejs/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/drasi-project/drasi-nodejs/compare/v0.2.2...v0.3.0
+[0.2.2]: https://github.com/drasi-project/drasi-nodejs/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/drasi-project/drasi-nodejs/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/drasi-project/drasi-nodejs/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/drasi-project/drasi-nodejs/compare/v0.1.0...v0.1.1
